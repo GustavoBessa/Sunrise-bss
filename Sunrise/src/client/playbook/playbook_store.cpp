@@ -454,7 +454,7 @@ struct JsonScanner {
     }
 
     /** Reads a JSON-quoted string, handling `\"` and `\\` escapes. */
-    [[nodiscard]] bool read_string(char* out, std::size_t cap, std::uint8_t& len) noexcept {
+    bool read_string(char* out, std::size_t cap, std::uint8_t& len) noexcept {
         skip_ws();
         if (text.empty() || text.front() != '"') {
             return false;
