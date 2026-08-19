@@ -92,6 +92,14 @@ void ensure_destination_locked(std::string_view destination) noexcept {
     // File I/O on the caller thread, which is the game's own pump. It runs only when the
     // destination changes, not per frame.
     (void)internal::load(path.chars.data(), g_roteiro);
+    // If no JSON file was found (count stays 0), try the legacy CSV for backward compatibility
+    // with roteiros written before version 4.
+    if (g_roteiro.count == 0 && g_directoryResolved) {
+        core::path::Buffer legacyPath{};
+        if (internal::resolve_legacy_path(g_directory, destination, legacyPath)) {
+            (void)internal::load(legacyPath.chars.data(), g_roteiro);
+        }
+    }
 }
 
 /** @return Squared distance between two world positions, which avoids a square root. */

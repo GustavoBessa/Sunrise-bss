@@ -24,7 +24,7 @@ namespace {
 /** The folder both ends of a share agree on. */
 constexpr std::wstring_view kSharedSuffix = L"\\shared";
 /** Filter the listing enumerates under. */
-constexpr std::wstring_view kFilter = L"\\*.csv";
+constexpr std::wstring_view kFilter = L"\\*.json";
 
 SRWLOCK g_lock{SRWLOCK_INIT};
 core::path::Buffer g_local{};

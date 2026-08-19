@@ -419,6 +419,233 @@ void parse_step_text(std::string_view line, Roteiro& output) noexcept {
     return true;
 }
 
+// ── JSON helpers ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Minimal forward-only JSON scanner for the one schema this module owns.
+ *
+ * Every `seek_key` call searches forward from the current position so field reads in write order
+ * are O(n) over the document, not O(n²). For step objects a fresh Scanner is scoped to just the
+ * object's text, so each step parse is O(objectSize * fieldCount).
+ */
+struct JsonScanner {
+    std::string_view text;
+
+    void skip_ws() noexcept {
+        while (!text.empty() && static_cast<unsigned char>(text.front()) <= ' ') {
+            text.remove_prefix(1);
+        }
+    }
+
+    /** Advances past `"key":` in the remaining text. @return True when found. */
+    [[nodiscard]] bool seek_key(const char* key) noexcept {
+        std::array<char, 80> pat{};
+        const int n = std::snprintf(pat.data(), pat.size(), "\"%s\":", key);
+        if (n <= 0) {
+            return false;
+        }
+        const std::string_view sv{pat.data(), static_cast<std::size_t>(n)};
+        const auto pos = text.find(sv);
+        if (pos == std::string_view::npos) {
+            return false;
+        }
+        text.remove_prefix(pos + sv.size());
+        return true;
+    }
+
+    /** Reads a JSON-quoted string, handling `\"` and `\\` escapes. */
+    [[nodiscard]] bool read_string(char* out, std::size_t cap, std::uint8_t& len) noexcept {
+        skip_ws();
+        if (text.empty() || text.front() != '"') {
+            return false;
+        }
+        text.remove_prefix(1);
+        len = 0;
+        while (!text.empty() && text.front() != '"') {
+            char ch = text.front();
+            text.remove_prefix(1);
+            if (ch == '\\' && !text.empty()) {
+                ch = text.front();
+                text.remove_prefix(1);
+            }
+            if (len < cap && static_cast<unsigned char>(ch) >= 0x20) {
+                out[len++] = ch;
+            }
+        }
+        if (!text.empty()) {
+            text.remove_prefix(1); // closing quote
+        }
+        return true;
+    }
+
+    [[nodiscard]] bool read_u32(std::uint32_t& out) noexcept {
+        skip_ws();
+        const char* b = text.data();
+        const auto r = std::from_chars(b, b + text.size(), out);
+        if (r.ec != std::errc{}) {
+            return false;
+        }
+        text.remove_prefix(static_cast<std::size_t>(r.ptr - b));
+        return true;
+    }
+
+    [[nodiscard]] bool read_i32(std::int32_t& out) noexcept {
+        skip_ws();
+        const char* b = text.data();
+        const auto r = std::from_chars(b, b + text.size(), out);
+        if (r.ec != std::errc{}) {
+            return false;
+        }
+        text.remove_prefix(static_cast<std::size_t>(r.ptr - b));
+        return true;
+    }
+
+    [[nodiscard]] bool read_float(float& out) noexcept {
+        skip_ws();
+        std::array<char, kFieldCapacity> buf{};
+        std::size_t i = 0;
+        while (i < text.size() && i < buf.size() - 1) {
+            const char c = text[i];
+            if (c == ',' || c == ']' || c == '}' || static_cast<unsigned char>(c) <= ' ') {
+                break;
+            }
+            buf[i++] = c;
+        }
+        if (i == 0) {
+            return false;
+        }
+        char* end = nullptr;
+        const float val = std::strtof(buf.data(), &end);
+        if (end == buf.data() || val != val || val > 3.0e38F || val < -3.0e38F) {
+            return false;
+        }
+        text.remove_prefix(i);
+        out = val;
+        return true;
+    }
+
+    [[nodiscard]] bool read_bool(bool& out) noexcept {
+        skip_ws();
+        if (text.size() >= 4 && text.substr(0, 4) == "true") {
+            out = true;
+            text.remove_prefix(4);
+            return true;
+        }
+        if (text.size() >= 5 && text.substr(0, 5) == "false") {
+            out = false;
+            text.remove_prefix(5);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns the text of the next JSON object `{}` in the remaining text, including braces, and
+     * advances past it. Handles nested objects and strings so braces inside strings do not confuse
+     * the depth counter.
+     */
+    [[nodiscard]] std::string_view next_object() noexcept {
+        const auto start = text.find('{');
+        if (start == std::string_view::npos) {
+            return {};
+        }
+        text.remove_prefix(start);
+        int depth = 0;
+        bool in_str = false;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            const char c = text[i];
+            if (in_str) {
+                if (c == '\\') {
+                    ++i; // skip escaped char
+                } else if (c == '"') {
+                    in_str = false;
+                }
+            } else if (c == '"') {
+                in_str = true;
+            } else if (c == '{') {
+                ++depth;
+            } else if (c == '}') {
+                if (--depth == 0) {
+                    const std::string_view obj = text.substr(0, i + 1);
+                    text.remove_prefix(i + 1);
+                    return obj;
+                }
+            }
+        }
+        return {};
+    }
+};
+
+/**
+ * Appends a JSON-escaped string literal (with surrounding quotes) to the document.
+ * Escapes `"` and `\`; other printable bytes pass through verbatim.
+ */
+[[nodiscard]] bool append_json_str(std::string_view s, Document& doc, std::size_t& used) noexcept {
+    if (used >= doc.size()) {
+        return false;
+    }
+    doc[used++] = '"';
+    for (const char ch : s) {
+        if (ch == '"' || ch == '\\') {
+            if (used >= doc.size()) {
+                return false;
+            }
+            doc[used++] = '\\';
+        }
+        if (used >= doc.size()) {
+            return false;
+        }
+        doc[used++] = ch;
+    }
+    if (used >= doc.size()) {
+        return false;
+    }
+    doc[used++] = '"';
+    return true;
+}
+
+/** Appends `"key": "value",\n` (with a leading indent) to the document. */
+[[nodiscard]] bool append_kv_str(const char* indent,
+                                 const char* key,
+                                 std::string_view val,
+                                 Document& doc,
+                                 std::size_t& used) noexcept {
+    const int n = std::snprintf(doc.data() + used, doc.size() - used, "%s\"%s\": ", indent, key);
+    if (n <= 0 || static_cast<std::size_t>(n) >= doc.size() - used) {
+        return false;
+    }
+    used += static_cast<std::size_t>(n);
+    if (!append_json_str(val, doc, used)) {
+        return false;
+    }
+    const int n2 = std::snprintf(doc.data() + used, doc.size() - used, ",\n");
+    if (n2 <= 0 || static_cast<std::size_t>(n2) >= doc.size() - used) {
+        return false;
+    }
+    used += static_cast<std::size_t>(n2);
+    return true;
+}
+
+/** Gate enum → JSON string token. */
+[[nodiscard]] const char* gate_token(Gate g) noexcept {
+    switch (g) {
+        case Gate::delay: return "delay";
+        case Gate::interaction: return "interaction";
+        case Gate::clearArea: return "clearArea";
+        default: return "place";
+    }
+}
+
+/** JSON string token → Gate enum. Falls back to `Gate::place` for unknown values. */
+[[nodiscard]] Gate gate_from_token(std::string_view token) noexcept {
+    if (token == "delay") return Gate::delay;
+    if (token == "interaction") return Gate::interaction;
+    if (token == "clearArea") return Gate::clearArea;
+    return Gate::place;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
 } // namespace
 
 /** Reports one store outcome on the Client channel. */
@@ -463,40 +690,216 @@ bool resolve_path(const core::path::Buffer& directory,
            && core::path::append(output, kFileExtension);
 }
 
-/** Reads one roteiro from disk. */
-bool load(const wchar_t* path, Roteiro& output) noexcept {
-    const HANDLE file = CreateFileW(path,
-                                    GENERIC_READ,
-                                    FILE_SHARE_READ,
-                                    nullptr,
-                                    OPEN_EXISTING,
-                                    FILE_ATTRIBUTE_NORMAL,
-                                    nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        // A destination with no roteiro yet is the ordinary case, not a failure.
-        const DWORD error = GetLastError();
-        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-    }
-    // On the heap: a whole roteiro with all its dialogue is far past what belongs on the caller's
-    // stack, and the caller here is the game's own render thread.
-    auto storage = std::make_unique<Document>();
-    if (!storage) {
-        (void)CloseHandle(file);
-        report_fail("load", "storage");
+/** Builds one destination's legacy CSV file path. Same validation as `resolve_path`. */
+bool resolve_legacy_path(const core::path::Buffer& directory,
+                         std::string_view destination,
+                         core::path::Buffer& output) noexcept {
+    if (destination.empty()) {
         return false;
     }
-    Document& document = *storage;
-    DWORD read = 0;
-    const bool readOk =
-        ReadFile(file, document.data(), static_cast<DWORD>(document.size() - 1), &read, nullptr)
-        != FALSE;
-    (void)CloseHandle(file);
-    if (!readOk) {
-        report_fail("load", "read");
+    output = directory;
+    if (!core::path::append(output, L"\\")) {
         return false;
+    }
+    std::array<wchar_t, state::build_data::scenarios::kNameCapacity + 1> wide{};
+    if (destination.size() >= wide.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < destination.size(); ++index) {
+        if (!name_byte(destination[index])) {
+            return false;
+        }
+        wide[index] = static_cast<wchar_t>(destination[index]);
+    }
+    return core::path::append(output, {wide.data(), destination.size()})
+           && core::path::append(output, kLegacyFileExtension);
+}
+
+// ── JSON load path ────────────────────────────────────────────────────────────────────────────────
+
+/** Parses one step JSON object. @return True when every mandatory field was valid. */
+[[nodiscard]] bool parse_json_step(std::string_view obj, Step& output) noexcept {
+    JsonScanner sc{obj};
+    Step step{};
+
+    std::uint32_t bubble = 0;
+    std::uint32_t sliceState = 0;
+    std::int32_t region = 0;
+    std::uint32_t spawnHash = 0;
+    float x = 0.0F, y = 0.0F, z = 0.0F, radius = kMinimumRadius;
+
+    if (!sc.seek_key("bubble") || !sc.read_u32(bubble)) return false;
+    JsonScanner sc2{obj};
+    if (!sc2.seek_key("sliceState") || !sc2.read_u32(sliceState)) return false;
+    JsonScanner sc3{obj};
+    if (!sc3.seek_key("region") || !sc3.read_i32(region)) return false;
+    JsonScanner sc4{obj};
+    if (!sc4.seek_key("spawnHash") || !sc4.read_u32(spawnHash)) return false;
+    JsonScanner sc5{obj};
+    if (!sc5.seek_key("x") || !sc5.read_float(x)) return false;
+    JsonScanner sc6{obj};
+    if (!sc6.seek_key("y") || !sc6.read_float(y)) return false;
+    JsonScanner sc7{obj};
+    if (!sc7.seek_key("z") || !sc7.read_float(z)) return false;
+    JsonScanner sc8{obj};
+    if (!sc8.seek_key("radius") || !sc8.read_float(radius)) return false;
+
+    if (radius < kMinimumRadius || radius > kMaximumRadius) return false;
+
+    step.bubble = bubble;
+    step.sliceState = sliceState;
+    step.region = region;
+    step.spawnHash = spawnHash;
+    step.position[0] = x;
+    step.position[1] = y;
+    step.position[2] = z;
+    step.radius = radius;
+
+    // audioTag is optional (default = kNoAudioTag = 0).
+    {
+        JsonScanner sa{obj};
+        std::uint32_t tag = 0;
+        if (sa.seek_key("audioTag") && sa.read_u32(tag) && tag != 0) {
+            step.audioTag = tag;
+        }
     }
 
-    std::string_view text(document.data(), read);
+    // gate (string) + numeric parameters.
+    {
+        JsonScanner sg{obj};
+        std::array<char, 16> gateBuf{};
+        std::uint8_t gateLen = 0;
+        if (sg.seek_key("gate") && sg.read_string(gateBuf.data(), gateBuf.size() - 1, gateLen)) {
+            step.gate = gate_from_token({gateBuf.data(), gateLen});
+        }
+    }
+    if (step.gate == Gate::delay) {
+        JsonScanner sd{obj};
+        std::uint32_t ms = 0;
+        if (sd.seek_key("delayMs") && sd.read_u32(ms) && ms <= kMaximumDelayMs) {
+            step.delayMs = static_cast<std::uint16_t>(ms);
+        }
+    }
+    if (step.gate == Gate::clearArea) {
+        JsonScanner sc9{obj};
+        std::uint32_t target = 0;
+        if (sc9.seek_key("targetActorCount") && sc9.read_u32(target)) {
+            step.targetActorCount = static_cast<std::uint16_t>(target);
+        }
+    }
+
+    // Text fields (optional).
+    {
+        JsonScanner sl{obj};
+        std::uint8_t len = 0;
+        if (sl.seek_key("label")) {
+            sl.read_string(step.label.data(), step.label.size() - 1, len);
+            step.labelLength = len;
+        }
+    }
+    {
+        JsonScanner so{obj};
+        std::uint8_t len = 0;
+        if (so.seek_key("objectiveText")) {
+            so.read_string(step.objectiveText.data(), step.objectiveText.size() - 1, len);
+            step.objectiveTextLength = len;
+        }
+    }
+    {
+        JsonScanner sc10{obj};
+        std::uint8_t len = 0;
+        if (sc10.seek_key("completionText")) {
+            sc10.read_string(step.completionText.data(), step.completionText.size() - 1, len);
+            step.completionTextLength = len;
+        }
+    }
+
+    output = step;
+    return true;
+}
+
+/** Parses the top-level JSON roteiro object into `output`. */
+[[nodiscard]] bool load_json(std::string_view text, Roteiro& output) noexcept {
+    // Minimal version check: the format key must be present.
+    {
+        JsonScanner sc{text};
+        if (!sc.seek_key("format")) {
+            report_fail("load", "magic");
+            return false;
+        }
+    }
+
+    // Metadata fields.
+    {
+        JsonScanner sc{text};
+        bool seq = false;
+        if (sc.seek_key("sequential") && sc.read_bool(seq)) {
+            output.sequential = seq;
+        }
+    }
+    {
+        JsonScanner sc{text};
+        std::uint8_t len = 0;
+        if (sc.seek_key("author")) {
+            sc.read_string(output.author.value.data(), output.author.value.size() - 1, len);
+            output.author.length = len;
+        }
+    }
+    {
+        JsonScanner sc{text};
+        std::uint8_t len = 0;
+        if (sc.seek_key("description")) {
+            sc.read_string(output.description.value.data(),
+                           output.description.value.size() - 1,
+                           len);
+            output.description.length = len;
+        }
+    }
+    {
+        JsonScanner sc{text};
+        std::uint8_t len = 0;
+        if (sc.seek_key("game_build")) {
+            sc.read_string(output.gameBuild.value.data(),
+                           output.gameBuild.value.size() - 1,
+                           len);
+            output.gameBuild.length = len;
+        }
+    }
+
+    // Steps array.
+    {
+        JsonScanner sc{text};
+        if (!sc.seek_key("steps")) {
+            return true; // No steps key means an empty roteiro — not an error.
+        }
+        std::size_t skipped = 0;
+        for (;;) {
+            const std::string_view obj = sc.next_object();
+            if (obj.empty()) {
+                break;
+            }
+            if (output.count >= output.steps.size()) {
+                report_fail("load", "capacity");
+                break;
+            }
+            Step step{};
+            if (parse_json_step(obj, step)) {
+                output.steps[output.count++] = step;
+            } else {
+                ++skipped;
+            }
+        }
+        if (skipped != 0) {
+            report_fail("load", "step");
+        }
+    }
+    return true;
+}
+
+// ── CSV load path (backward compat, v1/v2/v3) ────────────────────────────────────────────────────
+
+/** Parses the CSV document into `output`. Used only for pre-v4 files. */
+[[nodiscard]] bool load_csv(std::string_view text, Roteiro& output) noexcept {
     bool header = false;
     bool withSubtitle = false;
     std::size_t skipped = 0;
@@ -511,13 +914,11 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
             continue;
         }
         if (line.front() == '#') {
-            // Metadata rides in comments, so a build that does not know a key still loads the file.
             read_metadata(line, output);
             continue;
         }
         if (!header) {
             if (line == kMagicV2 || line == kMagicV3) {
-                // Both carry the column; version 3 leaves it empty and speaks through `+` lines.
                 withSubtitle = true;
             } else if (line != kMagicV1) {
                 report_fail("load", "magic");
@@ -526,12 +927,8 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
             header = true;
             continue;
         }
-        // Continuation lines attach to the step above them, so they are dispatched before the step
-        // parse and never consume a step slot.
         if (line.front() == kLineMarker) {
-            // A dialogue line from a roteiro written while subtitles existed. Skipped without being
-            // counted as malformed, so an older shared file loads without reporting a fault.
-            continue;
+            continue; // Legacy subtitle line, silently skipped.
         }
         if (line.front() == kGateMarker) {
             skipped += parse_gate(line, output) ? 0U : 1U;
@@ -562,7 +959,124 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
     return true;
 }
 
-/** Writes one roteiro to disk, replacing the file. */
+// ── Shared file I/O ───────────────────────────────────────────────────────────────────────────────
+
+/** Opens a file, reads its content into the document buffer, and closes it. */
+[[nodiscard]] bool read_file(const wchar_t* path, Document& document, DWORD& bytesRead) noexcept {
+    const HANDLE file = CreateFileW(path,
+                                    GENERIC_READ,
+                                    FILE_SHARE_READ,
+                                    nullptr,
+                                    OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    bytesRead = 0;
+    const bool ok =
+        ReadFile(file, document.data(), static_cast<DWORD>(document.size() - 1), &bytesRead, nullptr)
+        != FALSE;
+    (void)CloseHandle(file);
+    return ok;
+}
+
+/** Reads one roteiro from disk. Detects the format by the first non-whitespace byte. */
+bool load(const wchar_t* path, Roteiro& output) noexcept {
+    // On the heap: a whole roteiro document is far past what belongs on the render thread's stack.
+    auto storage = std::make_unique<Document>();
+    if (!storage) {
+        report_fail("load", "storage");
+        return false;
+    }
+    Document& document = *storage;
+    DWORD bytesRead = 0;
+    if (!read_file(path, document, bytesRead)) {
+        const DWORD error = GetLastError();
+        // A destination with no roteiro yet is the ordinary case, not a failure.
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+
+    std::string_view text(document.data(), bytesRead);
+    // Skip leading whitespace to find the format marker.
+    while (!text.empty() && static_cast<unsigned char>(text.front()) <= ' ') {
+        text.remove_prefix(1);
+    }
+    if (text.empty()) {
+        report_fail("load", "empty");
+        return false;
+    }
+    // v4 JSON starts with `{`; all earlier versions start with the ASCII magic string.
+    if (text.front() == '{') {
+        return load_json(text, output);
+    }
+    return load_csv(text, output);
+}
+
+// ── JSON save path ────────────────────────────────────────────────────────────────────────────────
+
+/** Appends one step as a JSON object to the document. */
+[[nodiscard]] bool append_json_step(const Step& step,
+                                    std::size_t ordinal,
+                                    bool last,
+                                    Document& doc,
+                                    std::size_t& used) noexcept {
+    const std::string_view label = label_of(step);
+    const std::string_view objective{step.objectiveText.data(), step.objectiveTextLength};
+    const std::string_view completion{step.completionText.data(), step.completionTextLength};
+
+    const int hdr = std::snprintf(doc.data() + used,
+                                  doc.size() - used,
+                                  "    {\n"
+                                  "      \"ordinal\": %zu,\n"
+                                  "      \"bubble\": %u,\n"
+                                  "      \"sliceState\": %u,\n"
+                                  "      \"region\": %d,\n"
+                                  "      \"spawnHash\": %u,\n"
+                                  "      \"x\": %.3f,\n"
+                                  "      \"y\": %.3f,\n"
+                                  "      \"z\": %.3f,\n"
+                                  "      \"radius\": %.1f,\n"
+                                  "      \"audioTag\": %u,\n"
+                                  "      \"gate\": \"%s\",\n"
+                                  "      \"delayMs\": %u,\n"
+                                  "      \"targetActorCount\": %u,\n",
+                                  ordinal,
+                                  static_cast<unsigned>(step.bubble),
+                                  static_cast<unsigned>(step.sliceState),
+                                  static_cast<int>(step.region),
+                                  static_cast<unsigned>(step.spawnHash),
+                                  static_cast<double>(step.position[0]),
+                                  static_cast<double>(step.position[1]),
+                                  static_cast<double>(step.position[2]),
+                                  static_cast<double>(step.radius),
+                                  static_cast<unsigned>(step.audioTag),
+                                  gate_token(step.gate),
+                                  static_cast<unsigned>(step.delayMs),
+                                  static_cast<unsigned>(step.targetActorCount));
+    if (hdr <= 0 || static_cast<std::size_t>(hdr) >= doc.size() - used) {
+        return false;
+    }
+    used += static_cast<std::size_t>(hdr);
+
+    // String fields: written with JSON escaping.
+    if (!append_kv_str("      ", "label", label, doc, used)) return false;
+    if (!append_kv_str("      ", "objectiveText", objective, doc, used)) return false;
+    // completionText is the last field; its trailing comma is replaced by no comma when it's last.
+    {
+        const int n = std::snprintf(doc.data() + used, doc.size() - used, "      \"completionText\": ");
+        if (n <= 0 || static_cast<std::size_t>(n) >= doc.size() - used) return false;
+        used += static_cast<std::size_t>(n);
+        if (!append_json_str(completion, doc, used)) return false;
+        const int n2 = std::snprintf(doc.data() + used, doc.size() - used, "\n    }%s\n",
+                                     last ? "" : ",");
+        if (n2 <= 0 || static_cast<std::size_t>(n2) >= doc.size() - used) return false;
+        used += static_cast<std::size_t>(n2);
+    }
+    return true;
+}
+
+/** Writes one roteiro to disk as a JSON document, replacing the file. */
 bool save(const wchar_t* path, const Roteiro& value) noexcept {
     auto storage = std::make_unique<Document>();
     if (!storage) {
@@ -571,43 +1085,67 @@ bool save(const wchar_t* path, const Roteiro& value) noexcept {
     }
     Document& document = *storage;
     std::size_t used = 0;
+
+    const std::string_view dest = destination_of(value);
     const std::string_view author = value_of(value.author);
     const std::string_view description = value_of(value.description);
     const std::string_view gameBuild = value_of(value.gameBuild);
-    const int header = std::snprintf(document.data(),
-                                     document.size(),
-                                     "%.*s\r\n"
-                                     "# destination %.*s\r\n"
-                                     "# order %s\r\n"
-                                     "# author %.*s\r\n"
-                                     "# description %.*s\r\n"
-                                     "# game_build %.*s\r\n"
-                                     "# step,bubble,slice,region,spawn_hash,x,y,z,radius,"
-                                     "subtitle_hash,audio_tag,label\r\n"
-                                     "# @,delay_ms | @,interaction | @,clear,N"
-                                     " | >,objective text | <,completion text\r\n",
-                                     static_cast<int>(kMagicV3.size()),
-                                     kMagicV3.data(),
-                                     static_cast<int>(destination_of(value).size()),
-                                     destination_of(value).data(),
-                                     value.sequential ? "sequential" : "free",
-                                     static_cast<int>(author.size()),
-                                     author.data(),
-                                     static_cast<int>(description.size()),
-                                     description.data(),
-                                     static_cast<int>(gameBuild.size()),
-                                     gameBuild.data());
-    if (header <= 0 || static_cast<std::size_t>(header) >= document.size()) {
+
+    // JSON header (all scalar metadata fields).
+    {
+        const int n = std::snprintf(document.data(),
+                                    document.size(),
+                                    "{\n"
+                                    "  \"format\": \"sunrise_playbook\",\n"
+                                    "  \"version\": 4,\n"
+                                    "  \"sequential\": %s,\n",
+                                    value.sequential ? "true" : "false");
+        if (n <= 0 || static_cast<std::size_t>(n) >= document.size()) {
+            report_fail("save", "header");
+            return false;
+        }
+        used = static_cast<std::size_t>(n);
+    }
+    if (!append_kv_str("  ", "destination", dest, document, used)) {
         report_fail("save", "header");
         return false;
     }
-    used = static_cast<std::size_t>(header);
+    if (!append_kv_str("  ", "author", author, document, used)) {
+        report_fail("save", "header");
+        return false;
+    }
+    if (!append_kv_str("  ", "description", description, document, used)) {
+        report_fail("save", "header");
+        return false;
+    }
+    if (!append_kv_str("  ", "game_build", gameBuild, document, used)) {
+        report_fail("save", "header");
+        return false;
+    }
+
+    // Steps array.
+    {
+        const int n = std::snprintf(document.data() + used, document.size() - used, "  \"steps\": [\n");
+        if (n <= 0 || static_cast<std::size_t>(n) >= document.size() - used) {
+            report_fail("save", "header");
+            return false;
+        }
+        used += static_cast<std::size_t>(n);
+    }
     for (std::size_t index = 0; index < value.count; ++index) {
-        if (!append_step(value.steps[index], index + 1, document, used)
-            || !append_continuations(value.steps[index], document, used)) {
+        const bool last = index + 1 == value.count;
+        if (!append_json_step(value.steps[index], index + 1, last, document, used)) {
             report_fail("save", "capacity");
             return false;
         }
+    }
+    {
+        const int n = std::snprintf(document.data() + used, document.size() - used, "  ]\n}\n");
+        if (n <= 0 || static_cast<std::size_t>(n) >= document.size() - used) {
+            report_fail("save", "footer");
+            return false;
+        }
+        used += static_cast<std::size_t>(n);
     }
 
     const HANDLE file = CreateFileW(
