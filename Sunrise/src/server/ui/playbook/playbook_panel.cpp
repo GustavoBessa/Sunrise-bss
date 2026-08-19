@@ -51,6 +51,9 @@ constexpr std::size_t kMetadataInputCapacity = book::kMetadataCapacity + 1;
 std::array<char, kLabelInputCapacity> g_label{};
 std::array<char, kTagInputCapacity> g_tag{};
 std::size_t g_selected{kNoSelection};
+/** Input buffers for the selected step's objective and completion text editors. */
+std::array<char, book::kStepTextCapacity + 1> g_objectiveText{};
+std::array<char, book::kStepTextCapacity + 1> g_completionText{};
 
 /** Manual-step section input state. */
 float g_manualX{};
@@ -191,15 +194,27 @@ void draw_manual_step(const location::Location& sampled) noexcept {
  * @param output Receives a short null-terminated description.
  */
 void format_gate(const book::Step& step, std::array<char, 24>& output) noexcept {
-    if (step.gate == book::Gate::delay) {
-        (void)std::snprintf(output.data(),
-                            output.size(),
-                            "+%.1fs",
-                            static_cast<double>(step.delayMs) / 1000.0);
-        return;
+    switch (step.gate) {
+        case book::Gate::delay:
+            (void)std::snprintf(output.data(),
+                                output.size(),
+                                "+%.1fs",
+                                static_cast<double>(step.delayMs) / 1000.0);
+            break;
+        case book::Gate::interaction:
+            (void)std::snprintf(output.data(), output.size(), "[E]%.0fu",
+                                static_cast<double>(step.radius));
+            break;
+        case book::Gate::clearArea:
+            (void)std::snprintf(output.data(), output.size(), "clr≤%u",
+                                static_cast<unsigned>(step.targetActorCount));
+            break;
+        case book::Gate::place:
+        default:
+            (void)std::snprintf(output.data(), output.size(), "%.0fu",
+                                static_cast<double>(step.radius));
+            break;
     }
-    (void)std::snprintf(
-        output.data(), output.size(), "%.0fu", static_cast<double>(step.radius));
 }
 
 /**
@@ -298,12 +313,23 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
                               ImGuiSelectableFlags_SpanAllColumns)) {
             g_selected = index;
             g_tag = {};
+            g_objectiveText = {};
+            g_completionText = {};
             if (step.audioTag != book::kNoAudioTag) {
                 (void)std::snprintf(g_tag.data(),
                                     g_tag.size(),
                                     "0x%08X",
                                     static_cast<unsigned>(step.audioTag));
             }
+            // Pre-fill text editors from the step's stored text.
+            const std::size_t objLen =
+                (std::min)(static_cast<std::size_t>(step.objectiveTextLength),
+                           g_objectiveText.size() - 1);
+            std::copy_n(step.objectiveText.data(), objLen, g_objectiveText.data());
+            const std::size_t compLen =
+                (std::min)(static_cast<std::size_t>(step.completionTextLength),
+                           g_completionText.size() - 1);
+            std::copy_n(step.completionText.data(), compLen, g_completionText.data());
         }
         ImGui::TableNextColumn();
         ImGui::Text("%u", static_cast<unsigned>(step.bubble));
@@ -329,45 +355,102 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
     ImGui::EndTable();
 }
 
+/** @return Short colour-coded label for each gate type. */
+const char* gate_label(book::Gate gate) noexcept {
+    switch (gate) {
+        case book::Gate::place:       return "Reach";
+        case book::Gate::delay:       return "Wait";
+        case book::Gate::interaction: return "Interact";
+        case book::Gate::clearArea:   return "Clear";
+        default:                      return "?";
+    }
+}
+
 /**
  * Draws the gate editor for one step.
  * @param index Step ordinal. @param step Step being edited.
  */
 void draw_gate(std::size_t index, const book::Step& step) noexcept {
-    const bool timed = step.gate == book::Gate::delay;
-    // The first step has nothing to wait on, so the choice is not offered there.
-    ImGui::BeginDisabled(index == 0);
-    if (ImGui::RadioButton("On reaching the place", !timed) && timed) {
+    // All four gate types are offered. Delay is disabled on the first step (nothing to follow).
+    const book::Gate g = step.gate;
+    const float quarter = ImGui::GetContentRegionAvail().x * 0.24F;
+    if (ImGui::RadioButton("Reach##gate", g == book::Gate::place) && g != book::Gate::place) {
         (void)book::set_gate(index, book::Gate::place, 0U);
     }
     ImGui::SameLine();
-    if (ImGui::RadioButton("After the previous step", timed) && !timed) {
+    ImGui::BeginDisabled(index == 0);
+    if (ImGui::RadioButton("Wait##gate", g == book::Gate::delay) && g != book::Gate::delay) {
         (void)book::set_gate(index, book::Gate::delay, book::kDefaultDelayMs);
     }
     ImGui::EndDisabled();
-    if (index == 0) {
-        ImGui::TextDisabled("the first step is always the place it was captured");
-        return;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Interact##gate", g == book::Gate::interaction)
+        && g != book::Gate::interaction) {
+        (void)book::set_gate(index, book::Gate::interaction, 0U);
     }
-    if (!timed) {
-        float radius = step.radius;
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
-        if (ImGui::DragFloat("Radius",
-                             &radius,
-                             0.5F,
-                             book::kMinimumRadius,
-                             book::kMaximumRadius,
-                             "%.1f units")) {
-            (void)book::set_radius(index, radius);
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Clear area##gate", g == book::Gate::clearArea)
+        && g != book::Gate::clearArea) {
+        (void)book::set_gate(index, book::Gate::clearArea, 0U);
+    }
+    (void)quarter;
+
+    switch (g) {
+        case book::Gate::place: {
+            float radius = step.radius;
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+            if (ImGui::DragFloat("Radius##gate",
+                                 &radius,
+                                 0.5F,
+                                 book::kMinimumRadius,
+                                 book::kMaximumRadius,
+                                 "%.1f units")) {
+                (void)book::set_radius(index, radius);
+            }
+            break;
         }
-        return;
+        case book::Gate::delay: {
+            if (index == 0) {
+                ImGui::TextDisabled("the first step has nothing to follow; change to another type");
+                break;
+            }
+            int delay = static_cast<int>(step.delayMs);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+            if (ImGui::DragInt("Wait##gate",
+                               &delay,
+                               50.0F,
+                               0,
+                               static_cast<int>(book::kMaximumDelayMs),
+                               "%d ms")) {
+                (void)book::set_gate(index, book::Gate::delay, static_cast<std::uint16_t>(delay));
+            }
+            ImGui::TextDisabled("measured from the moment the previous step fired");
+            break;
+        }
+        case book::Gate::interaction: {
+            float radius = step.radius;
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+            if (ImGui::DragFloat("Radius##gate",
+                                 &radius,
+                                 0.5F,
+                                 book::kMinimumRadius,
+                                 book::kMaximumRadius,
+                                 "%.1f units")) {
+                (void)book::set_radius(index, radius);
+            }
+            ImGui::TextDisabled("player must be in radius and press E (interact)");
+            break;
+        }
+        case book::Gate::clearArea: {
+            int target = static_cast<int>(step.targetActorCount);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+            if (ImGui::DragInt("Target actors##gate", &target, 1.0F, 0, 9999, "%d remaining")) {
+                (void)book::set_target_actors(index, static_cast<std::uint16_t>(target));
+            }
+            ImGui::TextDisabled("fires when live actor count falls to this value or below");
+            break;
+        }
     }
-    int delay = static_cast<int>(step.delayMs);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
-    if (ImGui::DragInt("Wait", &delay, 50.0F, 0, static_cast<int>(book::kMaximumDelayMs), "%d ms")) {
-        (void)book::set_gate(index, book::Gate::delay, static_cast<std::uint16_t>(delay));
-    }
-    ImGui::TextDisabled("measured from the moment the previous step fired");
 }
 
 /** Draws the editor for the selected step. @param roteiro Loaded roteiro. */
@@ -429,6 +512,21 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
             g_selected = kNoSelection;
             g_tag = {};
         }
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Presentation");
+    (void)components::filter::input("playbook_obj_text",
+                                    "Objective (shown while waiting for this step)",
+                                    g_objectiveText.data(),
+                                    g_objectiveText.size());
+    (void)components::filter::input("playbook_comp_text",
+                                    "Completion (shown when step fires)",
+                                    g_completionText.data(),
+                                    g_completionText.size());
+    if (ImGui::Button("Apply text", ImVec2(-FLT_MIN, 0.0F))) {
+        (void)book::set_objective_text(g_selected, std::string_view(g_objectiveText.data()));
+        (void)book::set_completion_text(g_selected, std::string_view(g_completionText.data()));
     }
 
     ImGui::Spacing();

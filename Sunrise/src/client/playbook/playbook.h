@@ -181,6 +181,9 @@ struct Run {
     /** That step's label, which is the only human-readable name a beat has. */
     std::array<char, kLabelCapacity> nextLabel{};
     std::uint8_t nextLabelLength{};
+    /** That step's objective text, shown instead of the label when present. */
+    std::array<char, kStepTextCapacity> nextObjective{};
+    std::uint8_t nextObjectiveLength{};
     /** How far the player is from the next step, in world units. */
     float nextDistance{};
     /**
@@ -192,6 +195,10 @@ struct Run {
     bool nextIsTimed{};
     /** Milliseconds still to wait for a timed next step. */
     std::uint64_t nextWaitMs{};
+    /** The next step fires on the interact key (E) while in radius. */
+    bool nextIsInteraction{};
+    /** The next step fires when the live actor count falls to its threshold. */
+    bool nextIsClearArea{};
     /** Milliseconds since the player entered the world. */
     std::uint64_t ageMs{};
     /** The roteiro's steps fire in order, so `nextOrdinal` is binding rather than advisory. */

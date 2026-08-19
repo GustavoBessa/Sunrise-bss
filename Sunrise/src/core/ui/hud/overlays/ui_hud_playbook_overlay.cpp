@@ -10,9 +10,11 @@
 
 #include <Windows.h>
 
+#include <cstdio>
 #include <imgui.h>
 
 #include "../../../../client/playbook/playbook.h"
+#include "../../../../server/runtime/server_runtime.h"
 
 namespace sunrise::core::ui::hud::overlays::playbook {
 namespace {
@@ -40,18 +42,28 @@ void draw_tracker() noexcept {
         return;
     }
     const std::string_view label{run.nextLabel.data(), run.nextLabelLength};
-    // The ordinal always shows; the label is the author's and may be empty.
-    if (label.empty()) {
+    const std::string_view objective{run.nextObjective.data(), run.nextObjectiveLength};
+    // The objective text takes precedence over the label when both exist.
+    const std::string_view shown = !objective.empty() ? objective : label;
+    if (shown.empty()) {
         ImGui::TextDisabled("next  %zu/%zu", run.nextOrdinal, run.stepCount);
     } else {
         ImGui::TextDisabled("next  %zu/%zu  %.*s",
                             run.nextOrdinal,
                             run.stepCount,
-                            static_cast<int>(label.size()),
-                            label.data());
+                            static_cast<int>(shown.size()),
+                            shown.data());
     }
     if (run.nextIsTimed) {
         ImGui::TextDisabled("in %.1fs", static_cast<double>(run.nextWaitMs) / 1000.0);
+        return;
+    }
+    if (run.nextIsInteraction) {
+        ImGui::TextDisabled("press E to interact");
+        return;
+    }
+    if (run.nextIsClearArea) {
+        ImGui::TextDisabled("clear area  |  %zu actors live", server::live_actor_count());
         return;
     }
     if (run.nextDistanceKnown) {

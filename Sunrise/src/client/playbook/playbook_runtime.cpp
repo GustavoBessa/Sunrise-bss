@@ -209,14 +209,17 @@ void build_announcement(std::size_t ordinal,
                         std::uint64_t now,
                         Announcement& output) noexcept {
     output = {};
+    // Completion text takes precedence over the label when both are set.
+    const std::string_view completion{step.completionText.data(), step.completionTextLength};
     const std::string_view label = label_of(step);
+    const std::string_view display = !completion.empty() ? completion : label;
     const char* prefix = "Step";
     if (ordinal == 1) {
         prefix = "Start";
     } else if (ordinal == count) {
         prefix = "End";
     }
-    if (label.empty()) {
+    if (display.empty()) {
         (void)std::snprintf(
             output.text.data(), output.text.size(), "%s %zu/%zu", prefix, ordinal, count);
     } else {
@@ -226,8 +229,8 @@ void build_announcement(std::size_t ordinal,
                             prefix,
                             ordinal,
                             count,
-                            static_cast<int>(label.size()),
-                            label.data());
+                            static_cast<int>(display.size()),
+                            display.data());
     }
     output.firedTick = now;
     output.present = true;
@@ -584,6 +587,63 @@ bool set_radius(std::size_t index, float radius) noexcept {
     return saved;
 }
 
+/** Replaces a step's actor threshold for a clearArea gate and saves. */
+bool set_target_actors(std::size_t index, std::uint16_t target) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    g_roteiro.steps[index].targetActorCount = target;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Copies text into a fixed step field, dropping bytes a line cannot carry. */
+static void copy_step_text(std::string_view source,
+                            std::array<char, kStepTextCapacity>& field,
+                            std::uint8_t& length) noexcept {
+    field = {};
+    length = 0;
+    for (char ch : source) {
+        if (length >= kStepTextCapacity) {
+            break;
+        }
+        if (static_cast<unsigned char>(ch) >= 0x20) {
+            field[length++] = ch;
+        }
+    }
+}
+
+/** Replaces a step's objective text and saves. */
+bool set_objective_text(std::size_t index, std::string_view text) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    Step& step = g_roteiro.steps[index];
+    copy_step_text(text, step.objectiveText, step.objectiveTextLength);
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Replaces a step's completion text and saves. */
+bool set_completion_text(std::size_t index, std::string_view text) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    Step& step = g_roteiro.steps[index];
+    copy_step_text(text, step.completionText, step.completionTextLength);
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
 /** Clears every step's reached latch. */
 void rearm() noexcept {
     AcquireSRWLockExclusive(&g_lock);
@@ -633,7 +693,11 @@ Run run_state(std::uint64_t now) noexcept {
         value.nextOrdinal = index + 1;
         value.nextLabel = step.label;
         value.nextLabelLength = step.labelLength;
+        value.nextObjective = step.objectiveText;
+        value.nextObjectiveLength = step.objectiveTextLength;
         value.nextIsTimed = step.gate == Gate::delay;
+        value.nextIsInteraction = step.gate == Gate::interaction;
+        value.nextIsClearArea = step.gate == Gate::clearArea;
         if (value.nextIsTimed) {
             const std::uint64_t wait =
                 static_cast<std::uint64_t>((std::min)(step.delayMs, kMaximumDelayMs));
@@ -642,10 +706,12 @@ Run run_state(std::uint64_t now) noexcept {
             value.nextWaitMs = waited >= wait ? std::uint64_t{0} : wait - waited;
             continue;
         }
+        if (value.nextIsClearArea) {
+            continue;
+        }
         if (g_lastSample.bubbleValid && g_lastSample.positionPresent
             && step.bubble == static_cast<std::uint32_t>(g_lastSample.bubble)) {
-            // Only within one bubble: a straight line across a bubble boundary is not a distance the
-            // player can walk, and reporting it would send them the wrong way.
+            // Only within one bubble: a straight line across a boundary is not a walkable distance.
             value.nextDistance =
                 std::sqrt(distance_squared(step.position, g_lastSample.position));
             value.nextDistanceKnown = true;
