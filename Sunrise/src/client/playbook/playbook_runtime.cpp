@@ -22,6 +22,7 @@
 #include <string_view>
 
 #include "../../core/logging/log.h"
+#include "../../server/runtime/server_runtime.h"
 #include "../diagnostics/activity_location.h"
 #include "internal.h"
 
@@ -45,6 +46,8 @@ bool g_wasInWorld{};
 std::uint64_t g_lastFiredTick{};
 /** Set once any step has fired this run, so a `delay` gate has something to follow. */
 bool g_anyFired{};
+/** Whether the interact key (VK_E) was held on the previous slice, used for leading-edge detect. */
+bool g_interactWasDown{};
 /**
  * The location sampled on the most recent slice.
  *
@@ -140,6 +143,21 @@ void ensure_destination_locked(std::string_view destination) noexcept {
 }
 
 /**
+ * @return True when the interact key (VK_E) has a leading edge this slice.
+ *
+ * The leading edge is sampled once per service call and cached in `g_interactWasDown`, so multiple
+ * steps cannot each consume the same key press. The game's default interact key is E (0x45).
+ * The player's actual binding could differ; wiring it through `key_bindings` is a future step.
+ */
+[[nodiscard]] bool interact_pressed_locked() noexcept {
+    constexpr int kInteractVk = 'E';
+    const bool down = (GetAsyncKeyState(kInteractVk) & 0x8000) != 0;
+    const bool edge = down && !g_interactWasDown;
+    g_interactWasDown = down;
+    return edge;
+}
+
+/**
  * Tests one step for firing. Runs under the lock.
  *
  * In a sequential roteiro only the next unfired step is eligible, which is what makes the roteiro a
@@ -148,11 +166,13 @@ void ensure_destination_locked(std::string_view destination) noexcept {
  * @param index Step ordinal.
  * @param sampled Current location, already known to be in world.
  * @param now Monotonic tick count in milliseconds.
+ * @param interactEdge True when the interact key had a leading edge this slice.
  * @return True when the step should fire on this slice.
  */
 [[nodiscard]] bool matches_locked(std::size_t index,
                                  const location::Location& sampled,
-                                 std::uint64_t now) noexcept {
+                                 std::uint64_t now,
+                                 bool interactEdge) noexcept {
     const Step& step = g_roteiro.steps[index];
     if (step.reached) {
         return false;
@@ -160,7 +180,17 @@ void ensure_destination_locked(std::string_view destination) noexcept {
     if (g_roteiro.sequential && index != 0 && !g_roteiro.steps[index - 1].reached) {
         return false;
     }
-    return step.gate == Gate::delay ? after_wait(step, now) : at_place(step, sampled);
+    switch (step.gate) {
+        case Gate::delay:
+            return after_wait(step, now);
+        case Gate::interaction:
+            return at_place(step, sampled) && interactEdge;
+        case Gate::clearArea:
+            return server::live_actor_count() <= static_cast<std::size_t>(step.targetActorCount);
+        case Gate::place:
+        default:
+            return at_place(step, sampled);
+    }
 }
 
 /**

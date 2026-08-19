@@ -26,6 +26,8 @@ inline constexpr std::uint32_t kNoAudioTag = 0;
 inline constexpr std::uint16_t kMaximumDelayMs = 60000;
 /** What a step waits by default once it is made timed, in milliseconds. */
 inline constexpr std::uint16_t kDefaultDelayMs = 2000;
+/** Bytes of one objective or completion text field, without a null. */
+inline constexpr std::size_t kStepTextCapacity = 96;
 
 /** What has to happen for a step to fire. */
 enum class Gate : std::uint8_t {
@@ -42,6 +44,21 @@ enum class Gate : std::uint8_t {
      * anything in a sequential roteiro, where "the previous step" is well defined.
      */
     delay = 1,
+    /**
+     * The player must be inside the radius **and** press the interact key (E by default).
+     *
+     * Use this for terminals, objects, or any moment the author wants the player to consciously
+     * acknowledge rather than walk through.
+     */
+    interaction = 2,
+    /**
+     * The live actor count must fall to `targetActorCount` or below.
+     *
+     * Today the count is the total across all Sunrise-hosted worlds (`server::live_actor_count()`),
+     * which reads as zero when no worlds are running. The source will be swapped to game-entity data
+     * once the entity hook is built; the gate condition itself stays the same.
+     */
+    clearArea = 3,
 };
 
 /**
@@ -77,9 +94,23 @@ struct Step {
     std::uint16_t delayMs{};
     /** What has to happen for this step to fire. */
     Gate gate{Gate::place};
+    /**
+     * How many actors must remain (or fewer) for a `clearArea` gate to fire.
+     * Zero means "all cleared". Not read for other gate types.
+     */
+    std::uint16_t targetActorCount{};
     /** Free text the author wrote for this step. */
     std::array<char, kLabelCapacity> label{};
     std::uint8_t labelLength{};
+    /**
+     * Text shown in the HUD while this is the next unfired step. May be empty, in which case the
+     * label is shown instead.
+     */
+    std::array<char, kStepTextCapacity> objectiveText{};
+    std::uint8_t objectiveTextLength{};
+    /** Text shown in the HUD when this step fires. May be empty. */
+    std::array<char, kStepTextCapacity> completionText{};
+    std::uint8_t completionTextLength{};
     /** Set once this step has fired in the current run. Never written to the file. */
     bool reached{};
 };

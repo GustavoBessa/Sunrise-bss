@@ -33,21 +33,38 @@ inline constexpr std::string_view kMagicV3 = "sunrise_playbook 3";
  */
 inline constexpr char kLineMarker = '+';
 /**
- * First byte of a line that makes the step above it wait on time instead of place.
- * The form is `@,<delay_ms>`. A step with no such line is gated on its captured position, which is
- * what every step written before timed gates existed means.
+ * First byte of a line that sets the gate type for the step above it.
+ *
+ * Forms:
+ *  - `@,<delay_ms>`          → Gate::delay (wait N ms after previous step)
+ *  - `@,interaction`         → Gate::interaction (press E in radius)
+ *  - `@,clear,<target>`      → Gate::clearArea (actor count ≤ target)
+ *
+ * A step with no such line is gated on its captured position, which is what every step written
+ * before timed gates existed means.
  */
 inline constexpr char kGateMarker = '@';
+/**
+ * First byte of an objective-text line.
+ * The form is `>,<text>`. The text is shown in the HUD while the step above is the next unfired
+ * one. A step with no such line has no custom objective text.
+ */
+inline constexpr char kObjectiveMarker = '>';
+/**
+ * First byte of a completion-text line.
+ * The form is `<,<text>`. The text is shown in the HUD when the step above fires.
+ */
+inline constexpr char kCompletionMarker = '<';
 /** Longest line one step occupies, including its terminator. */
 inline constexpr std::size_t kLineCapacity = 256;
 /**
  * Largest roteiro file accepted.
  *
- * Two lines per step covers a step and its gate, and the spare lines cover the header. `load` and
- * `save` hold the document on the heap even so: the callers here run on the game's own render thread,
+ * Up to four continuation lines per step: gate, objective text, completion text, and one spare.
+ * `load` and `save` hold the document on the heap: the callers run on the game's own render thread,
  * whose stack this module does not own.
  */
-inline constexpr std::size_t kFileCapacity = kLineCapacity * ((kStepCapacity * 2) + 8);
+inline constexpr std::size_t kFileCapacity = kLineCapacity * ((kStepCapacity * 4) + 8);
 /** One whole roteiro document. */
 using Document = std::array<char, kFileCapacity>;
 

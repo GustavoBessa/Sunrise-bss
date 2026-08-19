@@ -225,15 +225,19 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
 }
 
 /**
- * Parses one `@` continuation line into the timed gate of the step above it.
+ * Parses one `@` continuation line into the gate of the step above it.
+ *
+ * Forms:
+ *  `@,<delay_ms>`       → Gate::delay
+ *  `@,interaction`      → Gate::interaction
+ *  `@,clear,<target>`   → Gate::clearArea
  *
  * @param line Line without its terminator, `@` included.
  * @param output Roteiro whose most recent step receives the gate.
  * @return True when the gate was stored.
  */
 [[nodiscard]] bool parse_gate(std::string_view line, Roteiro& output) noexcept {
-    // A timed first step has nothing to wait on, so it would never fire and is refused here too.
-    if (output.count < 2) {
+    if (output.count == 0) {
         return false;
     }
     std::string_view rest = line.substr(1);
@@ -241,14 +245,65 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
         return false;
     }
     rest.remove_prefix(1);
+    Step& step = output.steps[output.count - 1];
+    if (rest == "interaction") {
+        step.gate = Gate::interaction;
+        return true;
+    }
+    if (rest.size() > 6 && rest.substr(0, 6) == "clear,") {
+        std::uint32_t target = 0;
+        if (!unsigned_field(rest.substr(6), target)) {
+            return false;
+        }
+        step.gate = Gate::clearArea;
+        step.targetActorCount = static_cast<std::uint16_t>(target);
+        return true;
+    }
+    // Legacy and current: numeric delay. Refused on the first step (nothing to follow).
+    if (output.count < 2) {
+        return false;
+    }
     std::uint32_t delay = 0;
     if (!unsigned_field(rest, delay) || delay > kMaximumDelayMs) {
         return false;
     }
-    Step& step = output.steps[output.count - 1];
     step.gate = Gate::delay;
     step.delayMs = static_cast<std::uint16_t>(delay);
     return true;
+}
+
+/** Stores one text continuation line into a step text field. */
+void store_step_text(std::string_view text,
+                     std::array<char, kStepTextCapacity>& field,
+                     std::uint8_t& length) noexcept {
+    field = {};
+    length = 0;
+    for (char ch : text) {
+        if (length >= kStepTextCapacity) {
+            break;
+        }
+        if (static_cast<unsigned char>(ch) >= 0x20) {
+            field[length++] = ch;
+        }
+    }
+}
+
+/**
+ * Parses one `>` or `<` continuation line into the objective/completion text of the step above it.
+ * @param line Line without its terminator, marker included.
+ * @param output Roteiro whose most recent step receives the text.
+ */
+void parse_step_text(std::string_view line, Roteiro& output) noexcept {
+    if (output.count == 0 || line.size() < 2 || line[1] != ',') {
+        return;
+    }
+    const std::string_view text = line.substr(2);
+    Step& step = output.steps[output.count - 1];
+    if (line.front() == kObjectiveMarker) {
+        store_step_text(text, step.objectiveText, step.objectiveTextLength);
+    } else {
+        store_step_text(text, step.completionText, step.completionTextLength);
+    }
 }
 
 /**
@@ -300,7 +355,7 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
 }
 
 /**
- * Appends one step's continuation lines, which today means only its timed gate.
+ * Appends one step's continuation lines: gate, objective text, and completion text.
  * @param step Step to write.
  * @param document Whole document storage.
  * @param used Bytes already written, advanced on success.
@@ -309,16 +364,54 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
 [[nodiscard]] bool append_continuations(const Step& step,
                                         Document& document,
                                         std::size_t& used) noexcept {
+    int written = 0;
     if (step.gate == Gate::delay) {
-        const int written = std::snprintf(document.data() + used,
-                                          document.size() - used,
-                                          "%c,%u\r\n",
-                                          kGateMarker,
-                                          static_cast<unsigned>(step.delayMs));
-        if (written <= 0 || static_cast<std::size_t>(written) >= document.size() - used) {
+        written = std::snprintf(document.data() + used,
+                                document.size() - used,
+                                "%c,%u\r\n",
+                                kGateMarker,
+                                static_cast<unsigned>(step.delayMs));
+    } else if (step.gate == Gate::interaction) {
+        written = std::snprintf(document.data() + used,
+                                document.size() - used,
+                                "%c,interaction\r\n",
+                                kGateMarker);
+    } else if (step.gate == Gate::clearArea) {
+        written = std::snprintf(document.data() + used,
+                                document.size() - used,
+                                "%c,clear,%u\r\n",
+                                kGateMarker,
+                                static_cast<unsigned>(step.targetActorCount));
+    }
+    if (written > 0) {
+        if (static_cast<std::size_t>(written) >= document.size() - used) {
             return false;
         }
         used += static_cast<std::size_t>(written);
+    }
+    if (step.objectiveTextLength > 0) {
+        const int obj = std::snprintf(document.data() + used,
+                                      document.size() - used,
+                                      "%c,%.*s\r\n",
+                                      kObjectiveMarker,
+                                      static_cast<int>(step.objectiveTextLength),
+                                      step.objectiveText.data());
+        if (obj <= 0 || static_cast<std::size_t>(obj) >= document.size() - used) {
+            return false;
+        }
+        used += static_cast<std::size_t>(obj);
+    }
+    if (step.completionTextLength > 0) {
+        const int comp = std::snprintf(document.data() + used,
+                                       document.size() - used,
+                                       "%c,%.*s\r\n",
+                                       kCompletionMarker,
+                                       static_cast<int>(step.completionTextLength),
+                                       step.completionText.data());
+        if (comp <= 0 || static_cast<std::size_t>(comp) >= document.size() - used) {
+            return false;
+        }
+        used += static_cast<std::size_t>(comp);
     }
     return true;
 }
@@ -441,6 +534,10 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
             skipped += parse_gate(line, output) ? 0U : 1U;
             continue;
         }
+        if (line.front() == kObjectiveMarker || line.front() == kCompletionMarker) {
+            parse_step_text(line, output);
+            continue;
+        }
         if (output.count >= output.steps.size()) {
             report_fail("load", "capacity");
             break;
@@ -484,7 +581,8 @@ bool save(const wchar_t* path, const Roteiro& value) noexcept {
                                      "# game_build %.*s\r\n"
                                      "# step,bubble,slice,region,spawn_hash,x,y,z,radius,"
                                      "subtitle_hash,audio_tag,label\r\n"
-                                     "# @,delay_ms   |   +,subtitle_hash,dwell_ms\r\n",
+                                     "# @,delay_ms | @,interaction | @,clear,N"
+                                     " | >,objective text | <,completion text\r\n",
                                      static_cast<int>(kMagicV3.size()),
                                      kMagicV3.data(),
                                      static_cast<int>(destination_of(value).size()),
