@@ -657,7 +657,6 @@ Run run_state(std::uint64_t now) noexcept {
             value.nextWaitMs = waited >= wait ? std::uint64_t{0} : wait - waited;
             continue;
         }
-        value.nextPosition = step.position;
         if (g_lastSample.bubbleValid && g_lastSample.positionPresent
             && step.bubble == static_cast<std::uint32_t>(g_lastSample.bubble)) {
             // Only within one bubble: a straight line across a bubble boundary is not a distance the
@@ -665,7 +664,6 @@ Run run_state(std::uint64_t now) noexcept {
             value.nextDistance =
                 std::sqrt(distance_squared(step.position, g_lastSample.position));
             value.nextDistanceKnown = true;
-            value.nextPositionHere = true;
         }
     }
     ReleaseSRWLockShared(&g_lock);

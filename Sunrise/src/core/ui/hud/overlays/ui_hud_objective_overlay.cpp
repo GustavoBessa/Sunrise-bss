@@ -42,9 +42,16 @@ constexpr float kLabelGap = 6.0F;
 
 /** The marker's fill and its outline. Amber, so it reads against the game's own blues and whites. */
 constexpr ImU32 kFill = IM_COL32(255, 196, 64, 210);
+/** The waypoints behind the first one, faded so the path reads as a direction. */
+constexpr ImU32 kTrailFill = IM_COL32(255, 196, 64, 110);
 constexpr ImU32 kEdge = IM_COL32(24, 18, 8, 230);
+constexpr ImU32 kTrail = IM_COL32(255, 196, 64, 90);
 constexpr ImU32 kText = IM_COL32(255, 226, 170, 240);
 constexpr ImU32 kTextShadow = IM_COL32(0, 0, 0, 200);
+/** Thickness of the line joining consecutive waypoints. */
+constexpr float kTrailThickness = 2.0F;
+/** How much smaller a following waypoint is drawn than the one being headed for. */
+constexpr float kTrailScale = 0.6F;
 
 /** @param range Distance to the beat. @return Half-width the diamond is drawn at. */
 [[nodiscard]] float radius_for(float range) noexcept {
@@ -52,13 +59,17 @@ constexpr ImU32 kTextShadow = IM_COL32(0, 0, 0, 200);
     return kNearRadius + ((kFarRadius - kNearRadius) * weight);
 }
 
-/** Draws the diamond and its outline centred on one point. */
-void draw_diamond(ImDrawList& list, const ImVec2& at, float radius) noexcept {
+/**
+ * Draws the diamond and its outline centred on one point.
+ * @param primary The waypoint the player is heading for, drawn solid rather than faded.
+ */
+void draw_diamond(ImDrawList& list, const ImVec2& at, float radius, bool primary) noexcept {
     const std::array<ImVec2, 4> points{ImVec2{at.x, at.y - radius},
                                        ImVec2{at.x + radius, at.y},
                                        ImVec2{at.x, at.y + radius},
                                        ImVec2{at.x - radius, at.y}};
-    list.AddConvexPolyFilled(points.data(), static_cast<int>(points.size()), kFill);
+    list.AddConvexPolyFilled(
+        points.data(), static_cast<int>(points.size()), primary ? kFill : kTrailFill);
     list.AddPolyline(
         points.data(), static_cast<int>(points.size()), kEdge, ImDrawFlags_Closed, kOutline);
 }

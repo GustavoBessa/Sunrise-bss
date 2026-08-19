@@ -177,13 +177,6 @@ struct Run {
     /** That step's label, which is the only human-readable name a beat has. */
     std::array<char, kLabelCapacity> nextLabel{};
     std::uint8_t nextLabelLength{};
-    /** Where the next step is, in world units. This is what an on-screen marker is drawn at. */
-    diagnostics::activity_location::Position nextPosition{};
-    /**
-     * The next step is in the bubble the player is in, so its position is somewhere they can reach.
-     * A position from another bubble belongs to another part of the map and must not be marked.
-     */
-    bool nextPositionHere{};
     /** How far the player is from the next step, in world units. */
     float nextDistance{};
     /**

@@ -23,6 +23,7 @@
 
 #include "../../../client/content/strings/subtitle_catalog.h"
 #include "../../../client/diagnostics/activity_location.h"
+#include "../../../client/diagnostics/camera_projection.h"
 #include "../../../client/playbook/playbook.h"
 #include "../../../client/playbook/playbook_share.h"
 #include "../../../core/ui/components/filter/ui_filter_component.h"
@@ -37,6 +38,7 @@ namespace location = client::diagnostics::activity_location;
 namespace components = core::ui::components;
 namespace catalog = client::content::strings::catalog;
 namespace share = book::share;
+namespace projection = client::diagnostics::camera_projection;
 
 /** No step is selected. It lies immediately outside any roteiro. */
 constexpr std::size_t kNoSelection = book::kStepCapacity;
@@ -188,6 +190,29 @@ void draw_run(const book::Roteiro& roteiro) noexcept {
             g_selected = run.nextOrdinal - 1;
         }
     }
+
+    const book::Route route = book::route_ahead();
+    if (route.active) {
+        ImGui::TextDisabled("marker follows waypoint %zu; %zu ahead drawn",
+                            route.nearestOrdinal,
+                            route.count);
+    } else if (run.active) {
+        ImGui::TextDisabled("no waypoint of this roteiro is in the bubble you are in");
+    }
+    // The game hands over no field of view, so the projection has to be told. A mismatch leaves the
+    // marker right at the centre of the screen and increasingly wrong towards its edges, which is
+    // exactly what it looks like when this is set wrong.
+    float fov = projection::field_of_view();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+    if (ImGui::DragFloat("Marker FOV",
+                         &fov,
+                         0.5F,
+                         projection::kMinimumFieldOfView,
+                         projection::kMaximumFieldOfView,
+                         "%.0f deg")) {
+        projection::set_field_of_view(fov);
+    }
+    ImGui::TextDisabled("match the game's own field of view, or the marker drifts off centre");
 }
 
 /** Draws the step table and keeps the selection inside it. @param roteiro Loaded roteiro. */
