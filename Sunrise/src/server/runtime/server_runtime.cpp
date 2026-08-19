@@ -46,6 +46,11 @@ void service(std::uint64_t now) noexcept {
     gameplay::service(now);
 }
 
+/** Delegates to the gameplay module's live actor counter. */
+std::size_t live_actor_count() noexcept {
+    return gameplay::live_actor_count();
+}
+
 /** Unregisters Server consumers in reverse registration order. */
 void shutdown() noexcept {
     ui::runtime::shutdown();

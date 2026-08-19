@@ -93,6 +93,7 @@ constexpr std::array<LineEntry, kStatusLineCount> kStatusLines{
     LineEntry{"Bubble", "status_bubble", true},
     LineEntry{"Slice set", "status_slice_set", true},
     LineEntry{"Closest spawn", "status_closest_spawn", true},
+    LineEntry{"Actor count", "status_actor_count", false},
 };
 
 /** @return The switch state every overlay starts with. */

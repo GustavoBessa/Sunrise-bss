@@ -25,6 +25,8 @@ enum class StatusLine : std::uint8_t {
     bubble,
     sliceSet,
     closestSpawn,
+    /** Live actor count from the Sunrise physics simulation. Off by default. */
+    actorCount,
     count,
 };
 

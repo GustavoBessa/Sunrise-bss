@@ -52,6 +52,13 @@ std::array<char, kLabelInputCapacity> g_label{};
 std::array<char, kTagInputCapacity> g_tag{};
 std::size_t g_selected{kNoSelection};
 
+/** Manual-step section input state. */
+float g_manualX{};
+float g_manualY{};
+float g_manualZ{};
+int g_manualBubble{};
+std::array<char, kLabelInputCapacity> g_manualLabel{};
+
 
 std::array<char, kMetadataInputCapacity> g_author{};
 std::array<char, kMetadataInputCapacity> g_description{};
@@ -124,6 +131,58 @@ void draw_controls(const location::Location& sampled, bool inWorld) noexcept {
     if (!capturable) {
         ImGui::TextDisabled(inWorld ? "waiting for a bubble and a position" : "not in world");
     }
+}
+
+/**
+ * Draws the manual-step authoring section.
+ *
+ * Lets the author add a step at arbitrary coordinates without physically walking there. Useful for
+ * designing roteiros offline or patching a captured path with a waypoint in a bubble not visited.
+ *
+ * @param sampled Current location, used to pre-fill coordinates on first open.
+ */
+void draw_manual_step(const location::Location& sampled) noexcept {
+    if (!ImGui::TreeNodeEx("Add step manually", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        return;
+    }
+    // Pre-fill with the player's current position the first time the section is opened while in
+    // world, so adding a step "here" is a one-click affair that still allows editing.
+    static bool g_prefilled{};
+    if (!g_prefilled && sampled.positionPresent && sampled.bubbleValid) {
+        g_manualX = sampled.position[0];
+        g_manualY = sampled.position[1];
+        g_manualZ = sampled.position[2];
+        g_manualBubble = static_cast<int>(sampled.bubble);
+        g_prefilled = true;
+    }
+    if (!sampled.positionPresent) {
+        g_prefilled = false;
+    }
+    const float half = ImGui::GetContentRegionAvail().x * 0.49F;
+    ImGui::SetNextItemWidth(half);
+    ImGui::DragFloat("X##man", &g_manualX, 0.5F, -FLT_MAX, FLT_MAX, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::DragFloat("Y##man", &g_manualY, 0.5F, -FLT_MAX, FLT_MAX, "%.2f");
+    ImGui::SetNextItemWidth(half);
+    ImGui::DragFloat("Z##man", &g_manualZ, 0.5F, -FLT_MAX, FLT_MAX, "%.2f");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputInt("Bubble##man", &g_manualBubble, 0);
+    (void)components::filter::input(
+        "playbook_manual_label", "Label (optional)", g_manualLabel.data(), g_manualLabel.size());
+    ImGui::Spacing();
+    if (ImGui::Button("Add step", ImVec2(-FLT_MIN, 0.0F))) {
+        location::Position pos{g_manualX, g_manualY, g_manualZ};
+        if (book::add_step(pos,
+                           static_cast<std::uint32_t>((std::max)(0, g_manualBubble)),
+                           std::string_view(g_manualLabel.data()))) {
+            g_manualLabel = {};
+            g_prefilled = false;
+            g_selected = kNoSelection;
+        }
+    }
+    ImGui::TreePop();
 }
 
 /**
@@ -371,6 +430,25 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
             g_tag = {};
         }
     }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Order");
+    // Move-up is swapping this step with the one before it.
+    ImGui::BeginDisabled(g_selected == 0);
+    if (ImGui::Button("Move up", ImVec2(ImGui::GetContentRegionAvail().x * 0.49F, 0.0F))) {
+        if (book::move_step_down(g_selected - 1)) {
+            --g_selected;
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(g_selected + 1 >= roteiro.count);
+    if (ImGui::Button("Move down", ImVec2(-FLT_MIN, 0.0F))) {
+        if (book::move_step_down(g_selected)) {
+            ++g_selected;
+        }
+    }
+    ImGui::EndDisabled();
 }
 
 /** Draws the sharing section: metadata, export, and the shared folder listing. */
@@ -466,6 +544,8 @@ void draw() noexcept {
                                 "Records this location as the next step of the roteiro.");
     ImGui::Spacing();
     draw_controls(sampled, inWorld);
+    ImGui::Spacing();
+    draw_manual_step(sampled);
 
     // Read after the controls, so a step captured this frame is already in the table below.
     ImGui::Spacing();

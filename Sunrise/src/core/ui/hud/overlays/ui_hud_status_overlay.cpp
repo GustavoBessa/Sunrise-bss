@@ -8,9 +8,11 @@
 
 #include "ui_hud_status_overlay.h"
 
+#include <cstdio>
 #include <imgui.h>
 
 #include "../../../../client/diagnostics/activity_location.h"
+#include "../../../../server/runtime/server_runtime.h"
 #include "../overlay.h"
 
 namespace sunrise::core::ui::hud::overlays::status {
@@ -39,26 +41,42 @@ void draw_line(StatusLine line, const location::Line& value, float valueColumn) 
 
 /** Draws the current-status lines inside the overlay window the stack has already started. */
 void draw() noexcept {
-    if (!enabled(StatusLine::activity) && !enabled(StatusLine::bubble)
-        && !enabled(StatusLine::sliceSet) && !enabled(StatusLine::closestSpawn)) {
+    const bool anyLocation = enabled(StatusLine::activity) || enabled(StatusLine::bubble)
+                             || enabled(StatusLine::sliceSet) || enabled(StatusLine::closestSpawn);
+    const bool showActors = enabled(StatusLine::actorCount);
+    if (!anyLocation && !showActors) {
         // With every line off the overlay would draw an empty box and say nothing.
         ImGui::TextDisabled("%s", kNoLines);
         return;
     }
     location::Location sampled{};
-    if (!location::sample(sampled)) {
-        // One line rather than the same stand-in on every row.
-        ImGui::TextDisabled("%s", kOutOfWorld);
-        return;
+    const bool inWorld = anyLocation && location::sample(sampled);
+    if (anyLocation) {
+        if (!inWorld) {
+            ImGui::TextDisabled("%s", kOutOfWorld);
+        } else {
+            location::Lines lines{};
+            location::format(sampled, lines);
+            const float valueColumn =
+                ImGui::CalcTextSize(kWidestLabel).x + (ImGui::GetStyle().ItemSpacing.x * 2.0F);
+            draw_line(StatusLine::activity, lines.activity, valueColumn);
+            draw_line(StatusLine::bubble, lines.bubble, valueColumn);
+            draw_line(StatusLine::sliceSet, lines.sliceSet, valueColumn);
+            draw_line(StatusLine::closestSpawn, lines.spawn, valueColumn);
+        }
     }
-    location::Lines lines{};
-    location::format(sampled, lines);
-    const float valueColumn =
-        ImGui::CalcTextSize(kWidestLabel).x + (ImGui::GetStyle().ItemSpacing.x * 2.0F);
-    draw_line(StatusLine::activity, lines.activity, valueColumn);
-    draw_line(StatusLine::bubble, lines.bubble, valueColumn);
-    draw_line(StatusLine::sliceSet, lines.sliceSet, valueColumn);
-    draw_line(StatusLine::closestSpawn, lines.spawn, valueColumn);
+    if (showActors) {
+        std::array<char, 32> count{};
+        (void)std::snprintf(count.data(),
+                            count.size(),
+                            "%zu",
+                            server::live_actor_count());
+        const float valueColumn =
+            ImGui::CalcTextSize(kWidestLabel).x + (ImGui::GetStyle().ItemSpacing.x * 2.0F);
+        ImGui::TextDisabled("%s", display_name(StatusLine::actorCount));
+        ImGui::SameLine(valueColumn);
+        ImGui::TextUnformatted(count.data());
+    }
 }
 
 } // namespace sunrise::core::ui::hud::overlays::status

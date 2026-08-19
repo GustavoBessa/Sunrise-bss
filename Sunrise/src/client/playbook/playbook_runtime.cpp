@@ -405,6 +405,48 @@ bool capture(std::string_view label) noexcept {
     return saved;
 }
 
+/** Appends one manually authored step and saves the roteiro. */
+bool add_step(location::Position position, std::uint32_t bubble, std::string_view label) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_roteiro.count >= kStepCapacity) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    Step step{};
+    step.position = position;
+    step.bubble = bubble;
+    step.gate = Gate::place;
+    step.radius = kDefaultRadius;
+    const std::size_t labelLength =
+        (std::min)(label.size(), kLabelCapacity);
+    for (std::size_t i = 0; i < labelLength; ++i) {
+        const char ch = label[i];
+        if (ch >= 0x20 && ch != ',') {
+            step.label[step.labelLength++] = ch;
+        }
+    }
+    if (g_roteiro.count == 0) {
+        g_roteiro.sequential = true;
+    }
+    g_roteiro.steps[g_roteiro.count++] = step;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Swaps steps at `index` and `index + 1` and saves the roteiro. */
+bool move_step_down(std::size_t index) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index + 1 >= g_roteiro.count) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    std::swap(g_roteiro.steps[index], g_roteiro.steps[index + 1]);
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
 /** Removes one step and saves the roteiro. */
 bool remove_step(std::size_t index) noexcept {
     AcquireSRWLockExclusive(&g_lock);
@@ -461,6 +503,33 @@ bool set_sequential(bool sequential) noexcept {
         return false;
     }
     g_roteiro.sequential = sequential;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Copies a metadata string, dropping commas and control bytes. */
+static void copy_metadata(std::string_view source, Metadata& target) noexcept {
+    target = {};
+    for (char ch : source) {
+        if (target.length >= kMetadataCapacity) {
+            break;
+        }
+        if (static_cast<unsigned char>(ch) >= 0x20 && ch != ',') {
+            target.value[target.length++] = ch;
+        }
+    }
+}
+
+/** Replaces the roteiro's author and description metadata and saves it. */
+bool set_metadata(std::string_view author, std::string_view description) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_roteiro.destinationLength == 0) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    copy_metadata(author, g_roteiro.author);
+    copy_metadata(description, g_roteiro.description);
     const bool saved = save_locked();
     ReleaseSRWLockExclusive(&g_lock);
     return saved;

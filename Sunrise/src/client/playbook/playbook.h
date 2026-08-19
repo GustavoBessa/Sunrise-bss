@@ -39,6 +39,28 @@ void service(std::uint64_t now) noexcept;
 [[nodiscard]] bool capture(std::string_view label) noexcept;
 
 /**
+ * Appends one step with manually supplied position data and saves the roteiro.
+ *
+ * This is the authoring path for destinations the author has not physically visited in the current
+ * session. The step gets `Gate::place` and the default radius; the caller supplies the rest.
+ *
+ * @param position World-space XYZ.
+ * @param bubble Bubble index the position is in.
+ * @param label Free text. Commas and control bytes are dropped.
+ * @return True when the step fit the roteiro and the file was written.
+ */
+[[nodiscard]] bool add_step(diagnostics::activity_location::Position position,
+                            std::uint32_t bubble,
+                            std::string_view label) noexcept;
+
+/**
+ * Swaps two adjacent steps and saves the roteiro.
+ * @param index Lower of the two ordinals. Must be below `count - 1`.
+ * @return True when both ordinals were valid and the file was written.
+ */
+[[nodiscard]] bool move_step_down(std::size_t index) noexcept;
+
+/**
  * Removes one step and saves the roteiro.
  * @param index Step ordinal, below the current count.
  * @return True when the ordinal existed and the file was written.
@@ -69,6 +91,14 @@ void service(std::uint64_t now) noexcept;
  * @return True when the file was written.
  */
 [[nodiscard]] bool set_sequential(bool sequential) noexcept;
+
+/**
+ * Replaces the roteiro's author and description metadata and saves it.
+ * @param author Author name. Commas and control bytes are dropped.
+ * @param description What the roteiro covers. Commas and control bytes are dropped.
+ * @return True when the file was written.
+ */
+[[nodiscard]] bool set_metadata(std::string_view author, std::string_view description) noexcept;
 
 /**
  * Replaces one step's fire radius and saves the roteiro.
