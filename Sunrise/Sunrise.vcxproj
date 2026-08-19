@@ -151,6 +151,7 @@
     <ClCompile Include="src\core\ui\hud\ui_hud_overlay_stack.cpp" />
     <ClCompile Include="src\core\ui\hud\overlays\ui_hud_logo_overlay.cpp" />
     <ClCompile Include="src\core\ui\hud\overlays\ui_hud_session_overlay.cpp" />
+    <ClCompile Include="src\core\ui\hud\overlays\ui_hud_playbook_overlay.cpp" />
     <ClCompile Include="src\core\ui\hud\overlays\ui_hud_status_overlay.cpp" />
     <ClCompile Include="src\core\ui\hud\store\hud_settings_store.cpp" />
     <ClCompile Include="src\core\ui\textures\ui_texture_slots.cpp" />
@@ -218,6 +219,8 @@
     <ClCompile Include="src\client\ui\movement\movement_panel.cpp" />
     <ClCompile Include="src\client\movement\movement_settings_store.cpp" />
     <ClCompile Include="src\client\spawn\spawn_keybind_store.cpp" />
+    <ClCompile Include="src\client\playbook\playbook_store.cpp" />
+    <ClCompile Include="src\client\playbook\playbook_runtime.cpp" />
     <ClCompile Include="src\client\content\entity_names\entity_name_cache.cpp" />
     <ClCompile Include="src\client\content\entity_names\localized_aliases.cpp" />
     <ClCompile Include="src\client\ui\player\player_panel.cpp" />
@@ -495,6 +498,7 @@
     <ClCompile Include="src\server\ui\activity_override\activity_override_panel.cpp" />
     <ClCompile Include="src\server\ui\activity_override\activity_override_lists.cpp" />
     <ClCompile Include="src\server\ui\spawn\spawn_panel.cpp" />
+    <ClCompile Include="src\server\ui\playbook\playbook_panel.cpp" />
     <ClCompile Include="src\server\transport\bap_listener.cpp" />
     <ClCompile Include="src\server\bap\bap_route.cpp" />
     <ClCompile Include="src\server\bap\plaintext.cpp" />
@@ -671,6 +675,7 @@
     <ClCompile Include="src\client\content\items\packages\package_root_tables.cpp" />
     <ClCompile Include="src\client\content\items\packages\package_item_rows.cpp" />
     <ClCompile Include="src\client\diagnostics\module_range.cpp" />
+    <ClCompile Include="src\client\diagnostics\activity_location.cpp" />
     <ClCompile Include="src\client\process\freeze\client_process_freeze.cpp" />
     <ClCompile Include="src\core\settings\address_text.cpp" />
     <ClCompile Include="src\core\settings\server\gameplay\gameplay_settings_validation.cpp" />
@@ -868,6 +873,7 @@
     <ClInclude Include="src\core\ui\hud\overlay.h" />
     <ClInclude Include="src\core\ui\hud\overlays\ui_hud_logo_overlay.h" />
     <ClInclude Include="src\core\ui\hud\overlays\ui_hud_session_overlay.h" />
+    <ClInclude Include="src\core\ui\hud\overlays\ui_hud_playbook_overlay.h" />
     <ClInclude Include="src\core\ui\hud\overlays\ui_hud_status_overlay.h" />
     <ClInclude Include="src\core\ui\hud\store\hud_settings_store.h" />
     <ClInclude Include="src\core\ui\textures\ui_texture_slots.h" />
@@ -904,6 +910,9 @@
     <ClInclude Include="src\client\runtime\runtime.h" />
     <ClInclude Include="src\client\movement\movement_settings_store.h" />
     <ClInclude Include="src\client\spawn\spawn_keybind_store.h" />
+    <ClInclude Include="src\client\playbook\definition.h" />
+    <ClInclude Include="src\client\playbook\internal.h" />
+    <ClInclude Include="src\client\playbook\playbook.h" />
     <ClInclude Include="src\client\content\entity_names\entity_name_cache.h" />
     <ClInclude Include="src\client\content\entity_names\localized_aliases.h" />
     <ClInclude Include="src\client\ui\player\player_panel.h" />
@@ -1095,6 +1104,7 @@
     <ClInclude Include="src\server\ui\activity_override\activity_override_panel.h" />
     <ClInclude Include="src\server\ui\activity_override\activity_override_lists.h" />
     <ClInclude Include="src\server\ui\spawn\spawn_panel.h" />
+    <ClInclude Include="src\server\ui\playbook\playbook_panel.h" />
     <ClInclude Include="src\server\bap\runtime.h" />
     <ClInclude Include="src\server\bap\internal.h" />
     <ClInclude Include="src\server\bap\encrypted\internal.h" />
@@ -1307,6 +1317,7 @@
     <ClInclude Include="src\middleware\content\packages\reader\locator_cache.h" />
     <ClInclude Include="src\server\bap\encrypted\push\queuez\queuez_push_reporting.h" />
     <ClInclude Include="src\client\diagnostics\module_range.h" />
+    <ClInclude Include="src\client\diagnostics\activity_location.h" />
     <ClInclude Include="src\client\process\freeze\client_process_freeze.h" />
     <ClInclude Include="src\core\settings\address_text.h" />
     <ClInclude Include="src\core\settings\server\gameplay\definition.h" />

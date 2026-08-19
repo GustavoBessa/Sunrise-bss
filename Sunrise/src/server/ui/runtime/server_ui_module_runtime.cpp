@@ -5,6 +5,7 @@
 #include "../../../core/ui/modules/registry/ui_module_registry.h"
 #include "../../../core/ui/modules/ui_module_descriptor.h"
 #include "../activity_override/activity_override_panel.h"
+#include "../playbook/playbook_panel.h"
 #include "../spawn/spawn_panel.h"
 
 namespace sunrise::server::ui::runtime {
@@ -16,9 +17,12 @@ constexpr std::string_view kOverrideStableId = "server.activity_override";
 constexpr std::string_view kOverrideDisplayName = "Activity";
 constexpr std::string_view kSpawnStableId = "server.spawn";
 constexpr std::string_view kSpawnDisplayName = "Spawn";
+constexpr std::string_view kPlaybookStableId = "server.playbook";
+constexpr std::string_view kPlaybookDisplayName = "Playbook";
 
 core::ui::modules::registry::PageRegistration g_overridePage;
 core::ui::modules::registry::PageRegistration g_spawnPage;
+core::ui::modules::registry::PageRegistration g_playbookPage;
 
 } // namespace
 
@@ -37,11 +41,20 @@ bool initialize() noexcept {
         g_overridePage.release();
         return false;
     }
+    if (!g_playbookPage.acquire(core::ui::modules::Owner::server,
+                                kPlaybookStableId,
+                                kPlaybookDisplayName,
+                                &playbook::draw)) {
+        g_spawnPage.release();
+        g_overridePage.release();
+        return false;
+    }
     return true;
 }
 
 /** Removes the Server module from the Core UI registry. */
 void shutdown() noexcept {
+    g_playbookPage.release();
     g_spawnPage.release();
     g_overridePage.release();
 }

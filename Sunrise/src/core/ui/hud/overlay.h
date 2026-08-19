@@ -12,6 +12,8 @@ enum class Overlay : std::uint8_t {
     currentStatus,
     /** The instances of the session the player is in. */
     session,
+    /** The roteiro step the player has just reached, if any. */
+    playbook,
     count,
 };
 

@@ -10,6 +10,7 @@
 #include "../scaling/dpi/ui_dpi_scaling.h"
 #include "overlay.h"
 #include "overlays/ui_hud_logo_overlay.h"
+#include "overlays/ui_hud_playbook_overlay.h"
 #include "overlays/ui_hud_session_overlay.h"
 #include "overlays/ui_hud_status_overlay.h"
 #include "store/hud_settings_store.h"
@@ -50,6 +51,9 @@ constexpr std::array<Entry, kOverlayCount> kOverlays{
     Entry{
         "Current Status", "current_status", "##sunrise_hud_status", &overlays::status::draw, false},
     Entry{"Session", "session", "##sunrise_hud_session", &overlays::session::draw, false},
+    // On by default: a roteiro that announces nothing would look broken, and it stays quiet until
+    // a step is actually reached.
+    Entry{"Playbook", "playbook", "##sunrise_hud_playbook", &overlays::playbook::draw, true},
 };
 
 /** One status line's identity and starting switch state. */

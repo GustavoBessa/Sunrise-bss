@@ -16,6 +16,7 @@
 #include "../hooks/spawn/spawn_runtime.h"
 #include "../hooks/teleport/runtime.h"
 #include "../movement/movement_settings_store.h"
+#include "../playbook/playbook.h"
 #include "../spawn/spawn_keybind_store.h"
 #include "../player/player_settings_store.h"
 #include "../targets/game.h"
@@ -32,6 +33,8 @@ bool initialize(void* module) noexcept {
     movement::initialize(module);
     spawn::initialize(module);
     player::initialize(module);
+    // The roteiro of a destination is loaded on first arrival, so this only resolves its directory.
+    playbook::initialize(module);
     return ui::runtime::initialize();
 }
 
@@ -103,6 +106,7 @@ bool shutdown() noexcept {
     runtime::g_graphicsStage = runtime::StageState::pending;
     runtime::g_platformStage = runtime::StageState::pending;
     ui::runtime::shutdown();
+    playbook::shutdown();
     spawn::shutdown();
     player::shutdown();
     movement::shutdown();
