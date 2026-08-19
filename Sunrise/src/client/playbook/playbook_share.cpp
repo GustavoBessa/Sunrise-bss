@@ -11,6 +11,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <memory>
 
 #include "../../core/filesystem/path.h"
 #include "../../state/build_data/runtime.h"
@@ -28,6 +29,14 @@ constexpr std::wstring_view kFilter = L"\\*.csv";
 SRWLOCK g_lock{SRWLOCK_INIT};
 core::path::Buffer g_local{};
 core::path::Buffer g_shared{};
+/**
+ * Working paths, held here rather than on the caller stack.
+ *
+ * One `Buffer` is 64 KB, and these run on the game's render thread. A handful of locals would put a
+ * third of a megabyte on a stack this module does not own, so the lock owns them instead.
+ */
+core::path::Buffer g_scratchA{};
+core::path::Buffer g_scratchB{};
 bool g_resolved{};
 
 /** @return True when a wide leaf name is a roteiro file this module wrote or accepts. */
@@ -52,11 +61,15 @@ bool g_resolved{};
     return output.destinationLength != 0;
 }
 
-/** Builds one path under a resolved folder. */
-[[nodiscard]] bool path_in(const core::path::Buffer& directory,
-                           std::string_view destination,
-                           core::path::Buffer& output) noexcept {
-    return g_resolved && internal::resolve_path(directory, destination, output);
+/**
+ * @param destination Package name from a listing.
+ * @return True when this install carries that destination's bubble layout.
+ *
+ * The layout row is wide, so it is read into heap storage rather than onto the caller's stack.
+ */
+[[nodiscard]] bool layout_known(std::string_view destination) noexcept {
+    auto layout = std::make_unique<state::build_data::scenarios::Definition>();
+    return layout && state::build_data::find_scenario_layout(destination, *layout);
 }
 
 } // namespace
@@ -103,49 +116,49 @@ bool export_current() noexcept {
         internal::report_fail("export", "empty");
         return false;
     }
-    AcquireSRWLockShared(&g_lock);
-    core::path::Buffer path{};
-    const bool built = path_in(g_shared, destination, path);
-    ReleaseSRWLockShared(&g_lock);
+    AcquireSRWLockExclusive(&g_lock);
+    const bool built = g_resolved && internal::resolve_path(g_shared, destination, g_scratchA);
+    const bool written = built && internal::save(g_scratchA.chars.data(), roteiro);
+    ReleaseSRWLockExclusive(&g_lock);
     if (!built) {
         internal::report_fail("export", "path");
-        return false;
     }
-    return internal::save(path.chars.data(), roteiro);
+    return written;
 }
 
 /** Lists the shared folder. */
 std::size_t list(std::span<Entry> output) noexcept {
-    AcquireSRWLockShared(&g_lock);
-    const bool resolved = g_resolved;
-    core::path::Buffer shared = g_shared;
-    core::path::Buffer local = g_local;
-    ReleaseSRWLockShared(&g_lock);
-    if (!resolved || output.empty()) {
+    if (output.empty()) {
         return 0;
     }
-    core::path::Buffer filter = shared;
-    if (!core::path::append(filter, kFilter)) {
+    AcquireSRWLockExclusive(&g_lock);
+    g_scratchA = g_shared;
+    if (!g_resolved || !core::path::append(g_scratchA, kFilter)) {
+        ReleaseSRWLockExclusive(&g_lock);
         return 0;
     }
 
     WIN32_FIND_DATAW found{};
-    const HANDLE search = FindFirstFileW(filter.chars.data(), &found);
+    const HANDLE search = FindFirstFileW(g_scratchA.chars.data(), &found);
     if (search == INVALID_HANDLE_VALUE) {
+        ReleaseSRWLockExclusive(&g_lock);
         return 0;
     }
+    // Reused across entries, because reading a roteiro to count its steps is the point of the walk.
+    auto scratch = std::make_unique<Roteiro>();
     std::size_t count = 0;
     do {
-        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        if ((found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || !scratch) {
             continue;
         }
-        Roteiro roteiro{};
+        *scratch = {};
+        Roteiro& roteiro = *scratch;
         if (!leaf_destination(found.cFileName, roteiro)) {
             continue;
         }
-        core::path::Buffer path{};
-        if (!internal::resolve_path(shared, playbook::destination_of(roteiro), path)
-            || !internal::load(path.chars.data(), roteiro) || roteiro.count == 0) {
+        const std::string_view destination = playbook::destination_of(roteiro);
+        if (!internal::resolve_path(g_shared, destination, g_scratchA)
+            || !internal::load(g_scratchA.chars.data(), roteiro) || roteiro.count == 0) {
             continue;
         }
         Entry& entry = output[count];
@@ -155,52 +168,52 @@ std::size_t list(std::span<Entry> output) noexcept {
         entry.author = roteiro.author;
         entry.description = roteiro.description;
         entry.steps = roteiro.count;
-        state::build_data::scenarios::Definition layout{};
-        entry.destinationKnown =
-            state::build_data::find_scenario_layout(playbook::destination_of(roteiro), layout);
-        core::path::Buffer localPath{};
-        entry.collides =
-            internal::resolve_path(local, playbook::destination_of(roteiro), localPath)
-            && GetFileAttributesW(localPath.chars.data()) != INVALID_FILE_ATTRIBUTES;
+        entry.destinationKnown = layout_known(destination);
+        entry.collides = internal::resolve_path(g_local, destination, g_scratchB)
+                         && GetFileAttributesW(g_scratchB.chars.data()) != INVALID_FILE_ATTRIBUTES;
         ++count;
     } while (count < output.size() && FindNextFileW(search, &found) != FALSE);
     (void)FindClose(search);
+    ReleaseSRWLockExclusive(&g_lock);
     return count;
 }
 
 /** Installs one shared roteiro locally. */
 bool import_entry(std::string_view destination, bool replace) noexcept {
-    AcquireSRWLockShared(&g_lock);
-    const bool resolved = g_resolved;
-    core::path::Buffer shared = g_shared;
-    core::path::Buffer local = g_local;
-    ReleaseSRWLockShared(&g_lock);
-    core::path::Buffer sharedPath{};
-    core::path::Buffer localPath{};
-    if (!resolved || !internal::resolve_path(shared, destination, sharedPath)
-        || !internal::resolve_path(local, destination, localPath)) {
-        internal::report_fail("import", "path");
+    auto scratch = std::make_unique<Roteiro>();
+    if (!scratch) {
+        internal::report_fail("import", "storage");
         return false;
     }
-    if (!replace && GetFileAttributesW(localPath.chars.data()) != INVALID_FILE_ATTRIBUTES) {
-        // A local roteiro is captured work, so replacing it is never implicit.
-        internal::report_fail("import", "collision");
-        return false;
-    }
-
-    Roteiro roteiro{};
-    const std::size_t length =
-        (std::min)(destination.size(), roteiro.destination.size());
+    Roteiro& roteiro = *scratch;
+    const std::size_t length = (std::min)(destination.size(), roteiro.destination.size());
     std::copy_n(destination.begin(), length, roteiro.destination.begin());
     roteiro.destinationLength = static_cast<std::uint8_t>(length);
-    if (!internal::load(sharedPath.chars.data(), roteiro) || roteiro.count == 0) {
-        internal::report_fail("import", "read");
+
+    const char* stage = nullptr;
+    bool installed = false;
+    AcquireSRWLockExclusive(&g_lock);
+    if (!g_resolved || !internal::resolve_path(g_shared, destination, g_scratchA)
+        || !internal::resolve_path(g_local, destination, g_scratchB)) {
+        stage = "path";
+    } else if (!replace && GetFileAttributesW(g_scratchB.chars.data()) != INVALID_FILE_ATTRIBUTES) {
+        // A local roteiro is captured work, so replacing it is never implicit.
+        stage = "collision";
+    } else if (!internal::load(g_scratchA.chars.data(), roteiro) || roteiro.count == 0) {
+        stage = "read";
+    } else {
+        installed = internal::save(g_scratchB.chars.data(), roteiro);
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    if (stage != nullptr) {
+        internal::report_fail("import", stage);
         return false;
     }
-    if (!internal::save(localPath.chars.data(), roteiro)) {
+    if (!installed) {
         return false;
     }
     // The runtime only reloads on a destination change, so an import of the current one needs this.
+    // Called outside this module's lock, because it takes the playbook runtime's own.
     reload();
     return true;
 }

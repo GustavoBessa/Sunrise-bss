@@ -85,22 +85,23 @@ bool collect_containers(const package_reader::Source& source,
     if (!scan_tags(source.directory, kStringRootClass, roots)) {
         return false;
     }
-    std::vector<std::byte> blob{};
+    // Not named `blob`: that would shadow the namespace the reads below are called through.
+    std::vector<std::byte> rootBytes{};
     std::uint32_t classId = 0;
     for (const std::uint32_t root : roots) {
         package_tables::Array rows{};
-        if (!package_reader::read_tag(source, scratch, root, blob, classId)
+        if (!package_reader::read_tag(source, scratch, root, rootBytes, classId)
             || classId != kStringRootClass
-            || !package_tables::find_array_at(blob, kStringRootDescriptor, rows)
-            || rows.elementClass != kStringRootRowClass || rows.dataOffset > blob.size()
-            || rows.count > (blob.size() - rows.dataOffset) / kStringRootRowStride) {
+            || !package_tables::find_array_at(rootBytes, kStringRootDescriptor, rows)
+            || rows.elementClass != kStringRootRowClass || rows.dataOffset > rootBytes.size()
+            || rows.count > (rootBytes.size() - rows.dataOffset) / kStringRootRowStride) {
             continue;
         }
         for (std::uint64_t index = 0; index < rows.count; ++index) {
             std::uint32_t tag = 0;
             const std::size_t row =
                 rows.dataOffset + static_cast<std::size_t>(index) * kStringRootRowStride;
-            if (blob::read(blob, row + kStringRootContainerTag, tag)) {
+            if (blob::read(rootBytes, row + kStringRootContainerTag, tag)) {
                 output.push_back(tag);
             }
         }

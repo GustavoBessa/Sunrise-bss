@@ -63,6 +63,9 @@ struct Step {
     bool reached{};
 };
 
+/** Bytes of one metadata value, without a null. */
+inline constexpr std::size_t kMetadataCapacity = 96;
+
 /** One free-text metadata value carried by a shared roteiro. */
 struct Metadata {
     std::array<char, kMetadataCapacity> value{};
@@ -93,8 +96,6 @@ struct Roteiro {
 inline constexpr std::size_t kAnnouncementCapacity = 128;
 /** Bytes of one shown subtitle, without a null. Long enough for a line of dialogue. */
 inline constexpr std::size_t kSubtitleCapacity = 200;
-/** Bytes of one metadata value, without a null. */
-inline constexpr std::size_t kMetadataCapacity = 96;
 
 /**
  * The most recently fired step, worded for the screen.
