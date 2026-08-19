@@ -163,17 +163,9 @@ using Fields = std::array<std::string_view, kFieldCountV2>;
     const std::size_t subtitleField = 9;
     const std::size_t audioField = withSubtitle ? 10 : 9;
     const std::size_t labelField = withSubtitle ? 11 : 10;
-    if (withSubtitle && !fields[subtitleField].empty()) {
-        // A version-2 file carried exactly one subtitle in a column. It becomes the step's first
-        // spoken line, so nothing already attached is lost. Version 3 leaves the column empty and
-        // writes every line as its own `+` line, dwell included.
-        std::uint32_t hash = 0;
-        if (!unsigned_field(fields[subtitleField], hash) || hash == 0) {
-            return false;
-        }
-        step.lines[0] = Line{hash, kDefaultDwellMs};
-        step.lineCount = 1;
-    }
+    // The subtitle column is read past and discarded. Roteiros written while subtitles existed still
+    // carry one, and refusing the line over it would cost the whole step.
+    static_cast<void>(subtitleField);
     // An empty audio column is the normal state today, so it reads as "no sound" rather than
     // failing the line.
     if (!fields[audioField].empty() && !unsigned_field(fields[audioField], step.audioTag)) {
@@ -230,50 +222,6 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
         // a file written before ordering existed says by saying nothing.
         output.sequential = value == "sequential";
     }
-}
-
-/**
- * Parses one `+` continuation line into a spoken line of the step above it.
- *
- * The form is `+,<subtitle_hash>,<dwell_ms>`, and the dwell may be left off to take the default. A
- * line before any step, or on a step whose dialogue is already full, is refused.
- *
- * @param line Line without its terminator, `+` included.
- * @param output Roteiro whose most recent step receives the line.
- * @return True when the line was stored.
- */
-[[nodiscard]] bool parse_line(std::string_view line, Roteiro& output) noexcept {
-    if (output.count == 0) {
-        return false;
-    }
-    Step& step = output.steps[output.count - 1];
-    if (step.lineCount >= step.lines.size()) {
-        return false;
-    }
-    std::string_view rest = line.substr(1);
-    if (rest.empty() || rest.front() != ',') {
-        return false;
-    }
-    rest.remove_prefix(1);
-    const std::size_t comma = rest.find(',');
-    const std::string_view hashField = comma == std::string_view::npos ? rest : rest.substr(0, comma);
-    Line stored{};
-    if (!unsigned_field(hashField, stored.subtitleHash) || stored.subtitleHash == 0) {
-        return false;
-    }
-    if (comma != std::string_view::npos) {
-        const std::string_view dwellField = rest.substr(comma + 1);
-        std::uint32_t dwell = 0;
-        if (!dwellField.empty()) {
-            if (!unsigned_field(dwellField, dwell) || dwell < kMinimumDwellMs
-                || dwell > kMaximumDwellMs) {
-                return false;
-            }
-            stored.dwellMs = static_cast<std::uint16_t>(dwell);
-        }
-    }
-    step.lines[step.lineCount++] = stored;
-    return true;
 }
 
 /**
@@ -352,7 +300,7 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
 }
 
 /**
- * Appends one step's continuation lines: its timed gate, then its dialogue in order.
+ * Appends one step's continuation lines, which today means only its timed gate.
  * @param step Step to write.
  * @param document Whole document storage.
  * @param used Bytes already written, advanced on success.
@@ -367,19 +315,6 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
                                           "%c,%u\r\n",
                                           kGateMarker,
                                           static_cast<unsigned>(step.delayMs));
-        if (written <= 0 || static_cast<std::size_t>(written) >= document.size() - used) {
-            return false;
-        }
-        used += static_cast<std::size_t>(written);
-    }
-    for (std::size_t index = 0; index < step.lineCount; ++index) {
-        const Line& line = step.lines[index];
-        const int written = std::snprintf(document.data() + used,
-                                          document.size() - used,
-                                          "%c,0x%08X,%u\r\n",
-                                          kLineMarker,
-                                          static_cast<unsigned>(line.subtitleHash),
-                                          static_cast<unsigned>(line.dwellMs));
         if (written <= 0 || static_cast<std::size_t>(written) >= document.size() - used) {
             return false;
         }
@@ -498,7 +433,8 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
         // Continuation lines attach to the step above them, so they are dispatched before the step
         // parse and never consume a step slot.
         if (line.front() == kLineMarker) {
-            skipped += parse_line(line, output) ? 0U : 1U;
+            // A dialogue line from a roteiro written while subtitles existed. Skipped without being
+            // counted as malformed, so an older shared file loads without reporting a fault.
             continue;
         }
         if (line.front() == kGateMarker) {

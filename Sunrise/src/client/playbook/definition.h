@@ -22,19 +22,6 @@ inline constexpr float kMinimumRadius = 1.0F;
 inline constexpr float kMaximumRadius = 200.0F;
 /** A step whose sound is not identified yet. Nothing plays for it. */
 inline constexpr std::uint32_t kNoAudioTag = 0;
-/**
- * Spoken lines one step carries.
- *
- * A step is one beat of the mission, and a beat is a short exchange rather than a whole scene: a
- * conversation longer than this is authored as the next beat, which also gives it its own anchor.
- */
-inline constexpr std::size_t kDialogueCapacity = 8;
-/** How long one line stays on screen by default, in milliseconds. */
-inline constexpr std::uint16_t kDefaultDwellMs = 3500;
-/** Below this a line is gone before it can be read. */
-inline constexpr std::uint16_t kMinimumDwellMs = 500;
-/** Above this one line would outlast the beat that carries it. */
-inline constexpr std::uint16_t kMaximumDwellMs = 20000;
 /** Longest wait a timed step may carry, in milliseconds. */
 inline constexpr std::uint16_t kMaximumDelayMs = 60000;
 /** What a step waits by default once it is made timed, in milliseconds. */
@@ -58,19 +45,7 @@ enum class Gate : std::uint8_t {
 };
 
 /**
- * One spoken line of a step's dialogue.
- *
- * The hash names a localized string in the installed game and the words are resolved from the
- * subtitle catalog at playback, so a shared roteiro carries references and never the game's text.
- */
-struct Line {
-    std::uint32_t subtitleHash{};
-    /** How long this line holds the screen before the next one takes it. */
-    std::uint16_t dwellMs{kDefaultDwellMs};
-};
-
-/**
- * One beat of a mission roteiro: where it happens, and what is said there.
+ * One beat of a mission roteiro: where it happens.
  *
  * A `place` step is matched by destination, bubble, and distance to `position` -- and, in a
  * sequential roteiro, by the previous step having fired. Nothing else is a match term.
@@ -98,9 +73,6 @@ struct Step {
     float radius{kDefaultRadius};
     /** Sound to play here, or `kNoAudioTag` while unknown. Nothing plays yet either way. */
     std::uint32_t audioTag{};
-    /** The dialogue spoken at this beat, in the order it is heard. */
-    std::array<Line, kDialogueCapacity> lines{};
-    std::uint8_t lineCount{};
     /** Wait after the previous step fired. Only read for a `delay` gate. */
     std::uint16_t delayMs{};
     /** What has to happen for this step to fire. */
@@ -111,11 +83,6 @@ struct Step {
     /** Set once this step has fired in the current run. Never written to the file. */
     bool reached{};
 };
-
-/** @param value Step to read. @return Its dialogue as a bounded view. */
-[[nodiscard]] inline std::span<const Line> lines_of(const Step& value) noexcept {
-    return {value.lines.data(), value.lineCount};
-}
 
 /** Bytes of one metadata value, without a null. */
 inline constexpr std::size_t kMetadataCapacity = 96;
@@ -156,35 +123,19 @@ struct Roteiro {
 
 /** Bytes of one announcement line, including its null. */
 inline constexpr std::size_t kAnnouncementCapacity = 128;
-/** Bytes of one shown subtitle, without a null. Long enough for a line of dialogue. */
-inline constexpr std::size_t kSubtitleCapacity = 200;
 
 /**
- * The most recently fired step, worded for the screen, with whichever line is currently spoken.
+ * The most recently fired step, worded for the screen.
  *
  * The wording lives here rather than in the overlay because the roteiro owns what its first and
- * last step mean. The line is chosen here too, by the runtime's own clock, so the text is fixed at
- * the moment it came up and cannot change under a catalog rebuild while it is on screen. The
- * overlay only decides how long the step line stays up.
+ * last step mean. The overlay only decides how long to keep it up.
  */
 struct Announcement {
     std::array<char, kAnnouncementCapacity> text{};
-    /** The line being spoken now, resolved when the catalog holds it. Empty otherwise. */
-    std::array<char, kSubtitleCapacity> subtitle{};
-    std::uint8_t subtitleLength{};
-    /** One-based position of that line in its beat, or zero when no line is up. */
-    std::uint8_t lineOrdinal{};
-    /** Lines the beat carries, so the screen can say how far into it the player is. */
-    std::uint8_t lineCount{};
     /** Tick the step fired on, which is what the overlay measures its hold against. */
     std::uint64_t firedTick{};
     bool present{};
 };
-
-/** @param value Announcement to read. @return Its subtitle as a bounded view. */
-[[nodiscard]] inline std::string_view subtitle_of(const Announcement& value) noexcept {
-    return {value.subtitle.data(), value.subtitleLength};
-}
 
 /** @param value Step to read. @return Its label as a bounded view. */
 [[nodiscard]] inline std::string_view label_of(const Step& value) noexcept {

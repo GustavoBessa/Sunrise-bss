@@ -15,7 +15,6 @@
 #include "../hooks/retail_log/retail_log_lifecycle.h"
 #include "../hooks/spawn/spawn_runtime.h"
 #include "../hooks/teleport/runtime.h"
-#include "../content/strings/subtitle_catalog.h"
 #include "../movement/movement_settings_store.h"
 #include "../playbook/playbook.h"
 #include "../playbook/playbook_share.h"
@@ -38,8 +37,6 @@ bool initialize(void* module) noexcept {
     // The roteiro of a destination is loaded on first arrival, so this only resolves its directory.
     playbook::initialize(module);
     playbook::share::initialize(module);
-    // The catalog resolves its cache path here and loads it on the first service slice.
-    content::strings::catalog::initialize(module);
     return ui::runtime::initialize();
 }
 
@@ -111,7 +108,6 @@ bool shutdown() noexcept {
     runtime::g_graphicsStage = runtime::StageState::pending;
     runtime::g_platformStage = runtime::StageState::pending;
     ui::runtime::shutdown();
-    content::strings::catalog::shutdown();
     playbook::share::shutdown();
     playbook::shutdown();
     spawn::shutdown();

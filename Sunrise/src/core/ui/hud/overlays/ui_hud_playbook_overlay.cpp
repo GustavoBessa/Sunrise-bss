@@ -23,9 +23,6 @@ namespace book = client::playbook;
 constexpr std::uint64_t kHoldMs = 6'000;
 /** Shown while no roteiro is loaded, so the enabled overlay is never an empty box. */
 constexpr char kIdle[] = "no roteiro for this destination";
-/** Subtitle wrap width, in font sizes, so it scales with the interface instead of the viewport. */
-constexpr float kSubtitleWrapEms = 24.0F;
-
 /**
  * Draws the tracker line: which beat the roteiro is waiting for, and what it is waiting on.
  *
@@ -67,14 +64,7 @@ void draw_tracker() noexcept {
 
 } // namespace
 
-/**
- * Draws the most recently reached roteiro step and whichever of its lines is spoken now.
- *
- * The two hold independently. The step line is a notification and fades on a timer; the spoken line
- * lives for exactly as long as the roteiro says it does, and outlasts the step line whenever the
- * dialogue is longer than the notification. That split is also what lets a preview from the
- * interface reach the screen: it speaks without any step having fired.
- */
+/** Draws the most recently reached roteiro step, or the way to the next one. */
 void draw() noexcept {
     const book::Announcement announcement = book::last_announcement();
     const std::uint64_t now = GetTickCount64();
@@ -82,33 +72,12 @@ void draw() noexcept {
     // wrapping into a very long hold.
     const bool holding = announcement.present && now >= announcement.firedTick
                          && now - announcement.firedTick < kHoldMs;
-    const std::string_view subtitle = book::subtitle_of(announcement);
-    const bool speaking = announcement.lineOrdinal != 0;
-    if (!holding && !speaking) {
+    if (!holding) {
         // Nothing just happened, so the overlay says where the mission goes next instead.
         draw_tracker();
         return;
     }
-    if (holding) {
-        ImGui::TextUnformatted(announcement.text.data());
-    }
-    if (!speaking) {
-        return;
-    }
-    // The counter comes up even while the words do not, so a line whose string this install lacks
-    // reads as a gap in the dialogue rather than as the dialogue having stopped.
-    if (announcement.lineCount > 1) {
-        ImGui::TextDisabled("%u/%u",
-                            static_cast<unsigned>(announcement.lineOrdinal),
-                            static_cast<unsigned>(announcement.lineCount));
-    }
-    if (subtitle.empty()) {
-        return;
-    }
-    // Wrapped, because a line of dialogue is longer than the step line above it.
-    ImGui::PushTextWrapPos(ImGui::GetFontSize() * kSubtitleWrapEms);
-    ImGui::TextUnformatted(subtitle.data(), subtitle.data() + subtitle.size());
-    ImGui::PopTextWrapPos();
+    ImGui::TextUnformatted(announcement.text.data());
 }
 
 } // namespace sunrise::core::ui::hud::overlays::playbook

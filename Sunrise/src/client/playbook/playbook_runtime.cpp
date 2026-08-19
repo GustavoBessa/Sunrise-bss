@@ -24,7 +24,6 @@
 #include "../../core/logging/log.h"
 #include "../diagnostics/activity_location.h"
 #include "internal.h"
-#include "playbook_dialogue.h"
 
 namespace sunrise::client::playbook {
 namespace {
@@ -181,8 +180,6 @@ void build_announcement(std::size_t ordinal,
                         Announcement& output) noexcept {
     output = {};
     const std::string_view label = label_of(step);
-    // The spoken line is not filled here: it changes while this announcement is on screen, so the
-    // dialogue clock writes it into every copy handed out instead.
     const char* prefix = "Step";
     if (ordinal == 1) {
         prefix = "Start";
@@ -285,7 +282,6 @@ void initialize(void* module) noexcept {
 
 /** Drops the loaded roteiro and the resolved directory. */
 void shutdown() noexcept {
-    dialogue::stop();
     AcquireSRWLockExclusive(&g_lock);
     g_roteiro = {};
     g_announcement = {};
@@ -305,8 +301,6 @@ void service(std::uint64_t now) noexcept {
     location::Location sampled{};
     // Sampled before the lock: it reads published State and never touches playbook storage.
     const bool inWorld = location::sample(sampled);
-    // Advanced before this module's lock is taken, so the two are only ever held in this order.
-    dialogue::service(now);
 
     AcquireSRWLockExclusive(&g_lock);
     g_lastSample = sampled;
@@ -328,9 +322,6 @@ void service(std::uint64_t now) noexcept {
         return;
     }
     ensure_destination_locked(destination);
-    // Beats fired on this slice, collected so dialogue starts after this module's lock is dropped.
-    Step spoken{};
-    bool speak = false;
     for (std::size_t index = 0; index < g_roteiro.count; ++index) {
         if (!matches_locked(index, sampled, now)) {
             continue;
@@ -343,15 +334,8 @@ void service(std::uint64_t now) noexcept {
         // Overlapping radii can fire more than one step in a tick. The last one wins the screen,
         // and the log carries every one of them.
         build_announcement(index + 1, g_roteiro.count, step, now, g_announcement);
-        if (step.lineCount != 0) {
-            spoken = step;
-            speak = true;
-        }
     }
     ReleaseSRWLockExclusive(&g_lock);
-    if (speak) {
-        dialogue::start(spoken, now);
-    }
 }
 
 /** Copies the loaded roteiro. */
@@ -450,64 +434,6 @@ bool set_audio_tag(std::size_t index, std::uint32_t audioTag) noexcept {
     return saved;
 }
 
-/** Appends one spoken line to a step and saves the roteiro. */
-bool append_line(std::size_t index, std::uint32_t subtitleHash) noexcept {
-    if (subtitleHash == 0) {
-        // A line with no words would hold the screen saying nothing.
-        return false;
-    }
-    AcquireSRWLockExclusive(&g_lock);
-    if (index >= g_roteiro.count) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return false;
-    }
-    Step& step = g_roteiro.steps[index];
-    if (step.lineCount >= step.lines.size()) {
-        ReleaseSRWLockExclusive(&g_lock);
-        internal::report_fail("line", "capacity");
-        return false;
-    }
-    step.lines[step.lineCount] = Line{subtitleHash, kDefaultDwellMs};
-    ++step.lineCount;
-    const bool saved = save_locked();
-    ReleaseSRWLockExclusive(&g_lock);
-    return saved;
-}
-
-/** Removes one spoken line from a step and saves the roteiro. */
-bool remove_line(std::size_t index, std::size_t line) noexcept {
-    AcquireSRWLockExclusive(&g_lock);
-    if (index >= g_roteiro.count || line >= g_roteiro.steps[index].lineCount) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return false;
-    }
-    Step& step = g_roteiro.steps[index];
-    for (std::size_t at = line + 1; at < step.lineCount; ++at) {
-        step.lines[at - 1] = step.lines[at];
-    }
-    --step.lineCount;
-    step.lines[step.lineCount] = {};
-    const bool saved = save_locked();
-    ReleaseSRWLockExclusive(&g_lock);
-    return saved;
-}
-
-/** Replaces one spoken line's time on screen and saves the roteiro. */
-bool set_line_dwell(std::size_t index, std::size_t line, std::uint16_t dwellMs) noexcept {
-    if (dwellMs < kMinimumDwellMs || dwellMs > kMaximumDwellMs) {
-        return false;
-    }
-    AcquireSRWLockExclusive(&g_lock);
-    if (index >= g_roteiro.count || line >= g_roteiro.steps[index].lineCount) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return false;
-    }
-    g_roteiro.steps[index].lines[line].dwellMs = dwellMs;
-    const bool saved = save_locked();
-    ReleaseSRWLockExclusive(&g_lock);
-    return saved;
-}
-
 /** Replaces what has to happen for one step to fire, and saves the roteiro. */
 bool set_gate(std::size_t index, Gate gate, std::uint16_t delayMs) noexcept {
     if (gate == Gate::delay && delayMs > kMaximumDelayMs) {
@@ -540,42 +466,6 @@ bool set_sequential(bool sequential) noexcept {
     return saved;
 }
 
-/** Speaks one step's dialogue now, without the player having to reach it. */
-bool preview(std::size_t index, std::uint64_t now) noexcept {
-    Step spoken{};
-    AcquireSRWLockExclusive(&g_lock);
-    const bool found = index < g_roteiro.count && g_roteiro.steps[index].lineCount != 0;
-    if (found) {
-        spoken = g_roteiro.steps[index];
-    }
-    ReleaseSRWLockExclusive(&g_lock);
-    if (!found) {
-        return false;
-    }
-    // No latch moves and no step fires: a preview is for judging pacing, not for walking the run.
-    dialogue::start(spoken, now);
-    return true;
-}
-
-/** Stops a preview, or whatever else is being spoken. */
-void stop_preview() noexcept {
-    dialogue::stop();
-}
-
-/** Replaces one roteiro's metadata and saves it. */
-bool set_metadata(std::string_view author, std::string_view description) noexcept {
-    AcquireSRWLockExclusive(&g_lock);
-    if (g_roteiro.destinationLength == 0) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return false;
-    }
-    store_text(author, g_roteiro.author);
-    store_text(description, g_roteiro.description);
-    const bool saved = save_locked();
-    ReleaseSRWLockExclusive(&g_lock);
-    return saved;
-}
-
 /** Replaces one step's fire radius and saves the roteiro. */
 bool set_radius(std::size_t index, float radius) noexcept {
     if (radius < kMinimumRadius || radius > kMaximumRadius) {
@@ -601,7 +491,6 @@ void rearm() noexcept {
     // The clock restarts here too, so a rearm mid-run is a fresh run and not a resumed one.
     g_runStart = GetTickCount64();
     ReleaseSRWLockExclusive(&g_lock);
-    dialogue::stop();
 }
 
 /** Forces the roteiro to be read from disk on the next slice. */
@@ -610,19 +499,13 @@ void reload() noexcept {
     g_loaded = false;
     g_announcement = {};
     ReleaseSRWLockExclusive(&g_lock);
-    // The steps about to be replaced own whatever is being spoken.
-    dialogue::stop();
 }
 
 /** Copies the most recently fired step's announcement, with the line currently spoken. */
 Announcement last_announcement() noexcept {
     AcquireSRWLockShared(&g_lock);
-    Announcement snapshot = g_announcement;
+    const Announcement snapshot = g_announcement;
     ReleaseSRWLockShared(&g_lock);
-    // Filled after the release, so the two locks are only ever taken in this order. `present` is
-    // left alone: it means a step fired, and a preview speaks without one. The overlay holds the
-    // step line on a timer and the spoken line on its own, which is what lets a preview show up.
-    dialogue::fill(snapshot);
     return snapshot;
 }
 

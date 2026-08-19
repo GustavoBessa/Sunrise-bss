@@ -1,11 +1,11 @@
 /**
  * The mission playbook page. The top half lists the same four location values the HUD status
  * overlay shows, read and worded through the same shared sampler. The bottom half is the roteiro
- * built from them: a sequence of beats, each announcing itself when reached and speaking its lines.
+ * built from them: a linear sequence of beats, each announcing itself when reached.
  *
- * The authoring loop lives in the selected-step editor. Judging a conversation's pacing means
- * hearing it, and hearing it must not cost a walk across the destination for every adjustment, so
- * the beat can be played from here without the player having reached it.
+ * The run block and the step table are two views of one thing. Which beat comes next is answered by
+ * the playbook itself rather than recomputed here, so the page and the HUD can never disagree about
+ * where the mission stands.
  */
 
 #include "playbook_panel.h"
@@ -17,11 +17,9 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <imgui.h>
 #include <string_view>
 
-#include "../../../client/content/strings/subtitle_catalog.h"
 #include "../../../client/diagnostics/activity_location.h"
 #include "../../../client/diagnostics/camera_projection.h"
 #include "../../../client/playbook/playbook.h"
@@ -36,7 +34,6 @@ namespace {
 namespace book = client::playbook;
 namespace location = client::diagnostics::activity_location;
 namespace components = core::ui::components;
-namespace catalog = client::content::strings::catalog;
 namespace share = book::share;
 namespace projection = client::diagnostics::camera_projection;
 
@@ -48,10 +45,6 @@ constexpr std::size_t kLabelInputCapacity = book::kLabelCapacity + 1;
 constexpr std::size_t kTagInputCapacity = 16;
 /** Widest location label, which sets the value column for the four rows. */
 constexpr char kWidestLabel[] = "Closest spawn";
-/** Subtitle matches one search shows. */
-constexpr std::size_t kMatchCapacity = 40;
-/** Room for one search term plus its null. */
-constexpr std::size_t kSearchCapacity = 64;
 /** Room for one authored metadata value plus its null. */
 constexpr std::size_t kMetadataInputCapacity = book::kMetadataCapacity + 1;
 
@@ -59,18 +52,19 @@ std::array<char, kLabelInputCapacity> g_label{};
 std::array<char, kTagInputCapacity> g_tag{};
 std::size_t g_selected{kNoSelection};
 
-std::array<char, kSearchCapacity> g_search{};
-/** The term the results below were produced for, so the scan runs on a change and not per frame. */
-std::array<char, kSearchCapacity> g_searched{};
-std::array<catalog::Match, kMatchCapacity> g_matches{};
-std::size_t g_matchCount{};
-std::size_t g_matchSelected{kNoSelection};
 
 std::array<char, kMetadataInputCapacity> g_author{};
 std::array<char, kMetadataInputCapacity> g_description{};
 std::array<share::Entry, share::kListCapacity> g_shared{};
 std::size_t g_sharedCount{};
 bool g_sharedListed{};
+/**
+ * Shared entry whose replace is armed, or `kNoSelection`.
+ *
+ * Overwriting a local roteiro throws away captured work with no copy kept, so it takes two presses.
+ * The button's label was the only warning before, and a label is not a confirmation.
+ */
+std::size_t g_replacing{kNoSelection};
 
 /** Draws one location row as a muted label and its value. */
 void draw_location_row(const char* name, const location::Line& value, float valueColumn) noexcept {
@@ -223,14 +217,13 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
     }
     constexpr ImGuiTableFlags flags =
         ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
-    if (!ImGui::BeginTable("playbook_steps", 5, flags, ImVec2(0.0F, 220.0F))) {
+    if (!ImGui::BeginTable("playbook_steps", 4, flags, ImVec2(0.0F, 220.0F))) {
         return;
     }
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 28.0F);
     ImGui::TableSetupColumn("Bubble", ImGuiTableColumnFlags_WidthFixed, 52.0F);
     ImGui::TableSetupColumn("Gate", ImGuiTableColumnFlags_WidthFixed, 56.0F);
-    ImGui::TableSetupColumn("Lines", ImGuiTableColumnFlags_WidthFixed, 44.0F);
     ImGui::TableSetupColumn("Label");
     ImGui::TableHeadersRow();
 
@@ -264,12 +257,6 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
             ImGui::TextDisabled("%s", gate.data());
         } else {
             ImGui::TextUnformatted(gate.data());
-        }
-        ImGui::TableNextColumn();
-        if (step.lineCount == 0) {
-            ImGui::TextDisabled("-");
-        } else {
-            ImGui::Text("%u", static_cast<unsigned>(step.lineCount));
         }
         ImGui::TableNextColumn();
         // A reached step is marked so the run's progress is readable at a glance.
@@ -324,58 +311,6 @@ void draw_gate(std::size_t index, const book::Step& step) noexcept {
     ImGui::TextDisabled("measured from the moment the previous step fired");
 }
 
-/**
- * Draws one step's dialogue: its lines in order, their time on screen, and the play control.
- * @param index Step ordinal. @param step Step being edited.
- */
-void draw_dialogue(std::size_t index, const book::Step& step) noexcept {
-    if (step.lineCount == 0) {
-        ImGui::TextDisabled("no lines yet; find one under Subtitles and add it here");
-    }
-    for (std::size_t line = 0; line < step.lineCount; ++line) {
-        ImGui::PushID(static_cast<int>(line));
-        catalog::Match match{};
-        if (catalog::text_for(step.lines[line].subtitleHash, match)) {
-            ImGui::TextWrapped("%zu. %.*s",
-                               line + 1,
-                               static_cast<int>(match.length),
-                               match.text.data());
-        } else {
-            // Said plainly: the line still holds its slot and its wait, so the pacing the author
-            // wrote survives an install whose catalog does not carry this string.
-            ImGui::TextDisabled("%zu. 0x%08X, not in the catalog",
-                                line + 1,
-                                static_cast<unsigned>(step.lines[line].subtitleHash));
-        }
-        int dwell = static_cast<int>(step.lines[line].dwellMs);
-        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.4F);
-        if (ImGui::DragInt("##dwell",
-                           &dwell,
-                           50.0F,
-                           static_cast<int>(book::kMinimumDwellMs),
-                           static_cast<int>(book::kMaximumDwellMs),
-                           "%d ms")) {
-            (void)book::set_line_dwell(index, line, static_cast<std::uint16_t>(dwell));
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Remove")) {
-            (void)book::remove_line(index, line);
-        }
-        ImGui::PopID();
-    }
-    ImGui::Spacing();
-    ImGui::BeginDisabled(step.lineCount == 0);
-    if (ImGui::Button("Play", ImVec2(ImGui::GetContentRegionAvail().x * 0.49F, 0.0F))) {
-        (void)book::preview(index, GetTickCount64());
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Stop", ImVec2(-FLT_MIN, 0.0F))) {
-        book::stop_preview();
-    }
-    ImGui::TextDisabled("Play speaks the beat on the HUD without walking the route.");
-}
-
 /** Draws the editor for the selected step. @param roteiro Loaded roteiro. */
 void draw_selected(const book::Roteiro& roteiro) noexcept {
     if (g_selected >= roteiro.count) {
@@ -407,10 +342,6 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
     draw_gate(g_selected, step);
 
     ImGui::Spacing();
-    ImGui::SeparatorText("Dialogue");
-    draw_dialogue(g_selected, step);
-
-    ImGui::Spacing();
     ImGui::SeparatorText("Sound");
     (void)components::filter::input(
         "playbook_tag", "Audio tag, hex", g_tag.data(), g_tag.size());
@@ -440,74 +371,6 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
             g_tag = {};
         }
     }
-}
-
-/** Draws the subtitle catalog: its build state, a search, and the add-line action. */
-void draw_subtitles(const book::Roteiro& roteiro) noexcept {
-    if (!ImGui::TreeNodeEx("Subtitles", ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        return;
-    }
-    const catalog::Progress progress = catalog::progress();
-    if (progress.building) {
-        ImGui::TextDisabled("building  %zu / %zu containers  |  %zu strings",
-                            progress.containersDone,
-                            progress.containers,
-                            progress.rows);
-    } else if (progress.ready) {
-        ImGui::TextDisabled("%zu strings catalogued", progress.rows);
-    } else if (progress.failed) {
-        const std::string_view reason = catalog::failure();
-        ImGui::TextDisabled("no catalog  (%.*s)", static_cast<int>(reason.size()), reason.data());
-    } else {
-        ImGui::TextDisabled("no catalog yet");
-    }
-    ImGui::BeginDisabled(progress.building);
-    if (ImGui::Button("Build catalog")) {
-        catalog::rebuild();
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextDisabled("reads the game's own strings; English only");
-
-    ImGui::Spacing();
-    (void)components::filter::input(
-        "playbook_search", "Search subtitle text", g_search.data(), g_search.size());
-    // Scanned on a change, not per frame: the walk touches every catalogued string.
-    if (std::strcmp(g_search.data(), g_searched.data()) != 0) {
-        g_searched = g_search;
-        g_matchSelected = kNoSelection;
-        g_matchCount = catalog::search(std::string_view(g_search.data()), g_matches);
-    }
-
-    if (g_matchCount == 0) {
-        ImGui::TextDisabled("no matches");
-    } else if (ImGui::BeginListBox("##playbook_matches", ImVec2(-FLT_MIN, 160.0F))) {
-        for (std::size_t index = 0; index < g_matchCount; ++index) {
-            const catalog::Match& match = g_matches[index];
-            std::array<char, catalog::kTextCapacity + 32> row{};
-            (void)std::snprintf(row.data(),
-                                row.size(),
-                                "%.*s##match%zu",
-                                static_cast<int>(match.length),
-                                match.text.data(),
-                                index);
-            if (ImGui::Selectable(row.data(), g_matchSelected == index)) {
-                g_matchSelected = index;
-            }
-        }
-        ImGui::EndListBox();
-    }
-
-    const bool attachable = g_matchSelected < g_matchCount && g_selected < roteiro.count;
-    ImGui::BeginDisabled(!attachable);
-    if (ImGui::Button("Add as a line of the selected step", ImVec2(-FLT_MIN, 0.0F))) {
-        (void)book::append_line(g_selected, g_matches[g_matchSelected].hash);
-    }
-    ImGui::EndDisabled();
-    if (!attachable) {
-        ImGui::TextDisabled("select a step above and a subtitle here");
-    }
-    ImGui::TreePop();
 }
 
 /** Draws the sharing section: metadata, export, and the shared folder listing. */
@@ -559,13 +422,30 @@ void draw_share(const book::Roteiro& roteiro) noexcept {
             // Said now, because an import that cannot fire otherwise looks like a broken feature.
             ImGui::TextDisabled("this install has no such destination; steps would never fire");
         }
-        if (ImGui::Button(entry.collides ? "Replace" : "Import")) {
-            (void)share::import_entry(name, entry.collides);
-            g_sharedListed = false;
-        }
-        if (entry.collides) {
+        if (!entry.collides) {
+            if (ImGui::Button("Import")) {
+                (void)share::import_entry(name, false);
+                g_sharedListed = false;
+            }
+        } else if (g_replacing == index) {
+            // Armed. The second press is the one that overwrites, so the destructive click is never
+            // the first click: the local roteiro is captured work and there is no copy of it.
+            if (ImGui::Button("Overwrite my roteiro")) {
+                (void)share::import_entry(name, true);
+                g_replacing = kNoSelection;
+                g_sharedListed = false;
+            }
             ImGui::SameLine();
-            ImGui::TextDisabled("you already have this one");
+            if (ImGui::Button("Cancel")) {
+                g_replacing = kNoSelection;
+            }
+            ImGui::TextDisabled("this discards the roteiro you captured for this destination");
+        } else {
+            if (ImGui::Button("Replace")) {
+                g_replacing = index;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("you already have one for this destination");
         }
         ImGui::PopID();
         ImGui::Separator();
@@ -624,7 +504,6 @@ void draw() noexcept {
 
     ImGui::Spacing();
     ImGui::Spacing();
-    draw_subtitles(roteiro);
     draw_share(roteiro);
 }
 

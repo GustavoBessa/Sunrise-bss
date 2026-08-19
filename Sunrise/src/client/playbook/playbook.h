@@ -54,32 +54,6 @@ void service(std::uint64_t now) noexcept;
 [[nodiscard]] bool set_audio_tag(std::size_t index, std::uint32_t audioTag) noexcept;
 
 /**
- * Appends one spoken line to a step and saves the roteiro.
- * @param index Step ordinal, below the current count.
- * @param subtitleHash Localized string to speak. Zero is refused, because a line with no words
- * would hold the screen saying nothing.
- * @return True when the ordinal existed, the line fit, and the file was written.
- */
-[[nodiscard]] bool append_line(std::size_t index, std::uint32_t subtitleHash) noexcept;
-
-/**
- * Removes one spoken line from a step and saves the roteiro.
- * @param index Step ordinal, below the current count.
- * @param line Line ordinal, below that step's line count. Later lines close the gap.
- * @return True when both ordinals existed and the file was written.
- */
-[[nodiscard]] bool remove_line(std::size_t index, std::size_t line) noexcept;
-
-/**
- * Replaces one spoken line's time on screen and saves the roteiro.
- * @param index Step ordinal, below the current count.
- * @param line Line ordinal, below that step's line count.
- * @param dwellMs Milliseconds, between `kMinimumDwellMs` and `kMaximumDwellMs`.
- * @return True when the ordinals and the dwell were valid and the file was written.
- */
-[[nodiscard]] bool set_line_dwell(std::size_t index, std::size_t line, std::uint16_t dwellMs) noexcept;
-
-/**
  * Replaces what has to happen for one step to fire, and saves the roteiro.
  * @param index Step ordinal, below the current count.
  * @param gate `Gate::place` for the captured position, `Gate::delay` for a wait after the previous
@@ -95,28 +69,6 @@ void service(std::uint64_t now) noexcept;
  * @return True when the file was written.
  */
 [[nodiscard]] bool set_sequential(bool sequential) noexcept;
-
-/**
- * Speaks one step's dialogue now, without the player having to reach it.
- *
- * This is the authoring loop: judging a conversation's pacing means hearing it, and hearing it must
- * not cost a walk across the destination for every adjustment. It fires no step and moves no latch.
- *
- * @param index Step ordinal, below the current count.
- * @param now Monotonic tick count in milliseconds.
- * @return True when the ordinal existed and the step had something to say.
- */
-[[nodiscard]] bool preview(std::size_t index, std::uint64_t now) noexcept;
-
-/** Stops a preview, or whatever else is being spoken. */
-void stop_preview() noexcept;
-
-/**
- * Replaces one roteiro's metadata and saves it.
- * @param author Who authored it. @param description What it covers.
- * @return True when the file was written.
- */
-[[nodiscard]] bool set_metadata(std::string_view author, std::string_view description) noexcept;
 
 /**
  * Replaces one step's fire radius and saves the roteiro.
@@ -138,12 +90,10 @@ void rearm() noexcept;
 void reload() noexcept;
 
 /**
- * @return The most recently fired step's announcement, carrying whichever of its lines is currently
- * spoken, or one reporting nothing has fired.
+ * @return The most recently fired step's announcement, or one reporting nothing has fired.
  *
- * The HUD overlay reads this every frame and decides how long to keep the step line on screen, which
- * is why the announcement carries the tick it fired on instead of a countdown. Which line is spoken
- * is decided here rather than there, so the words are fixed the moment they come up.
+ * The HUD overlay reads this every frame and decides how long to keep it on screen, which is why the
+ * announcement carries the tick it fired on instead of a countdown.
  */
 [[nodiscard]] Announcement last_announcement() noexcept;
 

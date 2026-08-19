@@ -221,12 +221,10 @@
     <ClCompile Include="src\client\spawn\spawn_keybind_store.cpp" />
     <ClCompile Include="src\client\playbook\playbook_store.cpp" />
     <ClCompile Include="src\client\playbook\playbook_runtime.cpp" />
-    <ClCompile Include="src\client\playbook\playbook_dialogue.cpp" />
     <ClCompile Include="src\client\diagnostics\camera_projection.cpp" />
     <ClCompile Include="src\core\ui\hud\overlays\ui_hud_objective_overlay.cpp" />
     <ClCompile Include="src\client\playbook\playbook_share.cpp" />
     <ClCompile Include="src\client\content\strings\string_table.cpp" />
-    <ClCompile Include="src\client\content\strings\subtitle_catalog.cpp" />
     <ClCompile Include="src\client\content\entity_names\entity_name_cache.cpp" />
     <ClCompile Include="src\client\content\entity_names\localized_aliases.cpp" />
     <ClCompile Include="src\client\ui\player\player_panel.cpp" />
@@ -920,12 +918,10 @@
     <ClInclude Include="src\client\playbook\internal.h" />
     <ClInclude Include="src\client\playbook\playbook.h" />
     <ClInclude Include="src\client\playbook\playbook_share.h" />
-    <ClInclude Include="src\client\playbook\playbook_dialogue.h" />
     <ClInclude Include="src\client\diagnostics\camera_projection.h" />
     <ClInclude Include="src\core\ui\hud\overlays\ui_hud_objective_overlay.h" />
     <ClInclude Include="src\client\content\blob_read.h" />
     <ClInclude Include="src\client\content\strings\string_table.h" />
-    <ClInclude Include="src\client\content\strings\subtitle_catalog.h" />
     <ClInclude Include="src\client\content\entity_names\entity_name_cache.h" />
     <ClInclude Include="src\client\content\entity_names\localized_aliases.h" />
     <ClInclude Include="src\client\ui\player\player_panel.h" />

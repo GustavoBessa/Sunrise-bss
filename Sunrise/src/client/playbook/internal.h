@@ -18,19 +18,18 @@ inline constexpr std::wstring_view kFileExtension = L".csv";
  *
  * All three are read, because a roteiro captured against an older build must keep working:
  *  - version 1 has no subtitle column;
- *  - version 2 has one subtitle column, which loads as the step's first spoken line;
- *  - version 3 carries its dialogue on `+` continuation lines and leaves that column empty.
+ *  - version 2 added a subtitle column;
+ *  - version 3 added `+` dialogue lines and `@` gate lines.
  *
- * Everything written from here on is version 3. A version-3 file read by a version-2 build loses its
- * dialogue, which is the one direction that degrades: `+` lines are not steps, and the reader skips
- * a line it cannot parse rather than failing the file.
+ * Subtitles have since been removed. The column and the `+` lines are still read past so that every
+ * roteiro already captured keeps loading; only the `@` gate line is written now.
  */
 inline constexpr std::string_view kMagicV1 = "sunrise_playbook 1";
 inline constexpr std::string_view kMagicV2 = "sunrise_playbook 2";
 inline constexpr std::string_view kMagicV3 = "sunrise_playbook 3";
 /**
- * First byte of a line that adds one spoken line to the step above it.
- * The form is `+,<subtitle_hash>,<dwell_ms>`.
+ * First byte of a dialogue line, from when a step could carry subtitles.
+ * It is recognised only so an older file is read without its lines being reported as malformed.
  */
 inline constexpr char kLineMarker = '+';
 /**
@@ -44,12 +43,11 @@ inline constexpr std::size_t kLineCapacity = 256;
 /**
  * Largest roteiro file accepted.
  *
- * Every step may carry its full dialogue, and each spoken line is a line of the file. That makes the
- * document too large for the caller's stack, so `load` and `save` hold it on the heap -- the callers
- * here run on the game's own render thread, whose stack this module does not own.
+ * Two lines per step covers a step and its gate, and the spare lines cover the header. `load` and
+ * `save` hold the document on the heap even so: the callers here run on the game's own render thread,
+ * whose stack this module does not own.
  */
-inline constexpr std::size_t kFileCapacity =
-    kLineCapacity * (kStepCapacity * (1 + kDialogueCapacity) + 8);
+inline constexpr std::size_t kFileCapacity = kLineCapacity * ((kStepCapacity * 2) + 8);
 /** One whole roteiro document. */
 using Document = std::array<char, kFileCapacity>;
 
