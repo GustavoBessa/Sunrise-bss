@@ -259,6 +259,7 @@ void rearm_locked() noexcept {
     // A `delay` gate measures from the previous step of *this* run, so the history goes with it.
     g_lastFiredTick = 0;
     g_anyFired = false;
+    g_interactWasDown = false;
 }
 
 /** Copies authored text into fixed metadata storage, dropping bytes a line cannot carry. */
@@ -352,8 +353,10 @@ void service(std::uint64_t now) noexcept {
         return;
     }
     ensure_destination_locked(destination);
+    // The interact edge is sampled once for the whole sweep so only one step per tick can consume it.
+    const bool interactEdge = interact_pressed_locked();
     for (std::size_t index = 0; index < g_roteiro.count; ++index) {
-        if (!matches_locked(index, sampled, now)) {
+        if (!matches_locked(index, sampled, now, interactEdge)) {
             continue;
         }
         Step& step = g_roteiro.steps[index];

@@ -108,6 +108,30 @@ void service(std::uint64_t now) noexcept;
  */
 [[nodiscard]] bool set_radius(std::size_t index, float radius) noexcept;
 
+/**
+ * Replaces one step's actor-count threshold for a `clearArea` gate and saves the roteiro.
+ * @param index Step ordinal, below the current count.
+ * @param target How many actors may remain for the step to fire. Zero means "all cleared".
+ * @return True when the ordinal existed and the file was written.
+ */
+[[nodiscard]] bool set_target_actors(std::size_t index, std::uint16_t target) noexcept;
+
+/**
+ * Replaces one step's objective text and saves the roteiro.
+ * @param index Step ordinal, below the current count.
+ * @param text Text shown while this step is next. Trimmed to `kStepTextCapacity`.
+ * @return True when the ordinal existed and the file was written.
+ */
+[[nodiscard]] bool set_objective_text(std::size_t index, std::string_view text) noexcept;
+
+/**
+ * Replaces one step's completion text and saves the roteiro.
+ * @param index Step ordinal, below the current count.
+ * @param text Text shown when this step fires. Trimmed to `kStepTextCapacity`.
+ * @return True when the ordinal existed and the file was written.
+ */
+[[nodiscard]] bool set_completion_text(std::size_t index, std::string_view text) noexcept;
+
 /** Clears every step's reached latch so the roteiro can be walked again from the start. */
 void rearm() noexcept;
 
