@@ -1,10 +1,13 @@
 /**
- * The roteiro file format. One line per step, comma separated, so a roteiro stays readable and
- * hand editable without a JSON reader: the project's own JSON primitives are private members of
- * the Core settings parser, which gates the boot and must not grow a second caller.
+ * The roteiro file format. Version 4 onwards is a JSON object; versions 1-3 were comma-separated
+ * text and are still parsed as a read-only backward-compat path.
  *
- * A malformed line is skipped and reported rather than failing the load, so one bad hand edit
- * cannot cost the whole roteiro.
+ * The project's own JSON primitives are private members of the Core settings parser, which gates
+ * the boot and must not grow a second caller. This module therefore carries a minimal hand-rolled
+ * JSON serialiser and scanner for the one schema it owns.
+ *
+ * A malformed CSV step line is skipped and reported rather than failing the load, so one bad hand
+ * edit cannot cost the whole roteiro.
  */
 
 #include <Windows.h>

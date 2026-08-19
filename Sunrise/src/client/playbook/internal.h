@@ -12,7 +12,13 @@ namespace sunrise::client::playbook::internal {
 /** Directory the per-destination roteiro files live in, below the owned artifact directory. */
 inline constexpr std::wstring_view kDirectorySuffix = L"\\playbooks";
 /** Extension every roteiro file carries. */
-inline constexpr std::wstring_view kFileExtension = L".csv";
+inline constexpr std::wstring_view kFileExtension = L".json";
+/**
+ * Extension carried by roteiro files written before version 4.
+ * `load` falls back to this when no `.json` file is found for a destination, so roteiros captured
+ * before the format change load without any manual migration.
+ */
+inline constexpr std::wstring_view kLegacyFileExtension = L".csv";
 /**
  * First line of every roteiro file, which also carries the layout version.
  *
@@ -20,9 +26,10 @@ inline constexpr std::wstring_view kFileExtension = L".csv";
  *  - version 1 has no subtitle column;
  *  - version 2 added a subtitle column;
  *  - version 3 added `+` dialogue lines and `@` gate lines.
+ *  - version 4 switched to JSON (one object per file instead of CSV).
  *
- * Subtitles have since been removed. The column and the `+` lines are still read past so that every
- * roteiro already captured keeps loading; only the `@` gate line is written now.
+ * The CSV variants are still parsed as a backward-compat path; only the `@` gate line is written
+ * in the new JSON format.
  */
 inline constexpr std::string_view kMagicV1 = "sunrise_playbook 1";
 inline constexpr std::string_view kMagicV2 = "sunrise_playbook 2";
@@ -86,6 +93,18 @@ void report_fail(const char* stage, const char* reason) noexcept;
 [[nodiscard]] bool resolve_path(const core::path::Buffer& directory,
                                 std::string_view destination,
                                 core::path::Buffer& output) noexcept;
+
+/**
+ * Builds one destination's legacy CSV file path.
+ * Used as a read-only fallback when no JSON file exists yet for a destination.
+ * @param directory Resolved playbook directory.
+ * @param destination Lowercase package name.
+ * @param output Receives the whole path.
+ * @return True when the name is safe and the path fits fixed storage.
+ */
+[[nodiscard]] bool resolve_legacy_path(const core::path::Buffer& directory,
+                                       std::string_view destination,
+                                       core::path::Buffer& output) noexcept;
 
 /**
  * Reads one roteiro from disk.
