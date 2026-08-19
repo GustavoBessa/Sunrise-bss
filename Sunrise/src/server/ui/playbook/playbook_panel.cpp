@@ -11,11 +11,14 @@
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <imgui.h>
 #include <string_view>
 
+#include "../../../client/content/strings/subtitle_catalog.h"
 #include "../../../client/diagnostics/activity_location.h"
 #include "../../../client/playbook/playbook.h"
+#include "../../../client/playbook/playbook_share.h"
 #include "../../../core/ui/components/filter/ui_filter_component.h"
 #include "../../../core/ui/components/section/ui_section_component.h"
 
@@ -35,9 +38,32 @@ constexpr std::size_t kTagInputCapacity = 16;
 /** Widest location label, which sets the value column for the four rows. */
 constexpr char kWidestLabel[] = "Closest spawn";
 
+namespace catalog = client::content::strings::catalog;
+namespace share = book::share;
+
+/** Subtitle matches one search shows. */
+constexpr std::size_t kMatchCapacity = 40;
+/** Room for one search term plus its null. */
+constexpr std::size_t kSearchCapacity = 64;
+/** Room for one authored metadata value plus its null. */
+constexpr std::size_t kMetadataInputCapacity = book::kMetadataCapacity + 1;
+
 std::array<char, kLabelInputCapacity> g_label{};
 std::array<char, kTagInputCapacity> g_tag{};
 std::size_t g_selected{kNoSelection};
+
+std::array<char, kSearchCapacity> g_search{};
+/** The term the results below were produced for, so the scan runs on a change and not per frame. */
+std::array<char, kSearchCapacity> g_searched{};
+std::array<catalog::Match, kMatchCapacity> g_matches{};
+std::size_t g_matchCount{};
+std::size_t g_matchSelected{kNoSelection};
+
+std::array<char, kMetadataInputCapacity> g_author{};
+std::array<char, kMetadataInputCapacity> g_description{};
+std::array<share::Entry, share::kListCapacity> g_shared{};
+std::size_t g_sharedCount{};
+bool g_sharedListed{};
 
 /** Draws one location row as a muted label and its value. */
 void draw_location_row(const char* name, const location::Line& value, float valueColumn) noexcept {
@@ -76,9 +102,9 @@ void draw_location_row(const char* name, const location::Line& value, float valu
  * @param inWorld Whether a capture is possible at all.
  */
 void draw_controls(const location::Location& sampled, bool inWorld) noexcept {
-    // Every one of these is part of the match, so a step captured without them could never fire.
-    const bool capturable =
-        inWorld && sampled.bubbleValid && sampled.spawnFound && sampled.positionPresent;
+    // Only the match terms gate a capture. The nearest spawn is the step's readable anchor, so a
+    // catalog that is not ready yet costs the label, not the capture.
+    const bool capturable = inWorld && sampled.bubbleValid && sampled.positionPresent;
     (void)components::filter::input(
         "playbook_label", "Label for the next step", g_label.data(), g_label.size());
     ImGui::Spacing();
@@ -95,8 +121,7 @@ void draw_controls(const location::Location& sampled, bool inWorld) noexcept {
         book::rearm();
     }
     if (!capturable) {
-        ImGui::TextDisabled(
-            inWorld ? "waiting for a bubble, a position and a closest spawn" : "not in world");
+        ImGui::TextDisabled(inWorld ? "waiting for a bubble and a position" : "not in world");
     }
 }
 
@@ -141,12 +166,17 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
         ImGui::TableNextColumn();
         ImGui::Text("%u", static_cast<unsigned>(step.bubble));
         ImGui::TableNextColumn();
-        state::build_data::hash_names::Name storage{};
-        const std::string_view named = location::spawn_set_name(step.spawnHash, storage);
-        if (named.empty()) {
-            ImGui::Text("0x%08X", static_cast<unsigned>(step.spawnHash));
+        if (step.spawnHash == 0) {
+            // Captured before the spawn catalog was ready, so this step has no readable anchor.
+            ImGui::TextDisabled("-");
         } else {
-            ImGui::Text("%.*s", static_cast<int>(named.size()), named.data());
+            state::build_data::hash_names::Name storage{};
+            const std::string_view named = location::spawn_set_name(step.spawnHash, storage);
+            if (named.empty()) {
+                ImGui::Text("0x%08X", static_cast<unsigned>(step.spawnHash));
+            } else {
+                ImGui::Text("%.*s", static_cast<int>(named.size()), named.data());
+            }
         }
         ImGui::TableNextColumn();
         ImGui::Text("%.1f", static_cast<double>(step.radius));
@@ -190,6 +220,20 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
         (void)book::set_radius(g_selected, radius);
     }
 
+    if (step.subtitleHash != 0) {
+        catalog::Match match{};
+        if (catalog::text_for(step.subtitleHash, match)) {
+            ImGui::TextWrapped("Subtitle: %.*s", static_cast<int>(match.length), match.text.data());
+        } else {
+            ImGui::TextDisabled("Subtitle 0x%08X, not in the catalog",
+                                static_cast<unsigned>(step.subtitleHash));
+        }
+        if (ImGui::SmallButton("Clear subtitle")) {
+            (void)book::set_subtitle(g_selected, 0);
+        }
+        ImGui::Spacing();
+    }
+
     (void)components::filter::input(
         "playbook_tag", "Audio tag, hex", g_tag.data(), g_tag.size());
     ImGui::TextDisabled("Nothing plays yet. The tag is stored for when a sound can be emitted.");
@@ -218,6 +262,137 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
             g_tag = {};
         }
     }
+}
+
+/** Draws the subtitle catalog: its build state, a search, and the attach action. */
+void draw_subtitles(const book::Roteiro& roteiro) noexcept {
+    if (!ImGui::TreeNodeEx("Subtitles", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        return;
+    }
+    const catalog::Progress progress = catalog::progress();
+    if (progress.building) {
+        ImGui::TextDisabled("building  %zu / %zu containers  |  %zu strings",
+                            progress.containersDone,
+                            progress.containers,
+                            progress.rows);
+    } else if (progress.ready) {
+        ImGui::TextDisabled("%zu strings catalogued", progress.rows);
+    } else if (progress.failed) {
+        const std::string_view reason = catalog::failure();
+        ImGui::TextDisabled("no catalog  (%.*s)", static_cast<int>(reason.size()), reason.data());
+    } else {
+        ImGui::TextDisabled("no catalog yet");
+    }
+    ImGui::BeginDisabled(progress.building);
+    if (ImGui::Button("Build catalog")) {
+        catalog::rebuild();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("reads the game's own strings; English only");
+
+    ImGui::Spacing();
+    (void)components::filter::input(
+        "playbook_search", "Search subtitle text", g_search.data(), g_search.size());
+    // Scanned on a change, not per frame: the walk touches every catalogued string.
+    if (std::strcmp(g_search.data(), g_searched.data()) != 0) {
+        g_searched = g_search;
+        g_matchSelected = kNoSelection;
+        g_matchCount = catalog::search(std::string_view(g_search.data()), g_matches);
+    }
+
+    if (g_matchCount == 0) {
+        ImGui::TextDisabled("no matches");
+    } else if (ImGui::BeginListBox("##playbook_matches", ImVec2(-FLT_MIN, 160.0F))) {
+        for (std::size_t index = 0; index < g_matchCount; ++index) {
+            const catalog::Match& match = g_matches[index];
+            std::array<char, catalog::kTextCapacity + 32> row{};
+            (void)std::snprintf(row.data(),
+                                row.size(),
+                                "%.*s##match%zu",
+                                static_cast<int>(match.length),
+                                match.text.data(),
+                                index);
+            if (ImGui::Selectable(row.data(), g_matchSelected == index)) {
+                g_matchSelected = index;
+            }
+        }
+        ImGui::EndListBox();
+    }
+
+    const bool attachable = g_matchSelected < g_matchCount && g_selected < roteiro.count;
+    ImGui::BeginDisabled(!attachable);
+    if (ImGui::Button("Attach to selected step", ImVec2(-FLT_MIN, 0.0F))) {
+        (void)book::set_subtitle(g_selected, g_matches[g_matchSelected].hash);
+    }
+    ImGui::EndDisabled();
+    if (!attachable) {
+        ImGui::TextDisabled("select a step above and a subtitle here");
+    }
+    ImGui::TreePop();
+}
+
+/** Draws the sharing section: metadata, export, and the shared folder listing. */
+void draw_share(const book::Roteiro& roteiro) noexcept {
+    if (!ImGui::TreeNodeEx("Share", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+        return;
+    }
+    (void)components::filter::input("playbook_author", "Author", g_author.data(), g_author.size());
+    (void)components::filter::input(
+        "playbook_description", "Description", g_description.data(), g_description.size());
+    ImGui::BeginDisabled(roteiro.count == 0);
+    if (ImGui::Button("Save details", ImVec2(ImGui::GetContentRegionAvail().x * 0.49F, 0.0F))) {
+        (void)book::set_metadata(std::string_view(g_author.data()),
+                                 std::string_view(g_description.data()));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export", ImVec2(-FLT_MIN, 0.0F))) {
+        if (share::export_current()) {
+            g_sharedListed = false;
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("Export writes to Sunrise\\playbooks\\shared");
+
+    ImGui::Spacing();
+    if (!g_sharedListed) {
+        g_sharedListed = true;
+        g_sharedCount = share::list(g_shared);
+    }
+    if (ImGui::Button("Refresh shared")) {
+        g_sharedListed = false;
+    }
+    if (g_sharedCount == 0) {
+        ImGui::TextDisabled("nothing in the shared folder");
+        ImGui::TreePop();
+        return;
+    }
+    for (std::size_t index = 0; index < g_sharedCount; ++index) {
+        const share::Entry& entry = g_shared[index];
+        const std::string_view name = share::destination_of(entry);
+        const std::string_view author = book::value_of(entry.author);
+        ImGui::PushID(static_cast<int>(index));
+        ImGui::Text("%.*s  |  %zu steps", static_cast<int>(name.size()), name.data(), entry.steps);
+        if (!author.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("by %.*s", static_cast<int>(author.size()), author.data());
+        }
+        if (!entry.destinationKnown) {
+            // Said now, because an import that cannot fire otherwise looks like a broken feature.
+            ImGui::TextDisabled("this install has no such destination; steps would never fire");
+        }
+        if (ImGui::Button(entry.collides ? "Replace" : "Import")) {
+            (void)share::import_entry(name, entry.collides);
+            g_sharedListed = false;
+        }
+        if (entry.collides) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("you already have this one");
+        }
+        ImGui::PopID();
+        ImGui::Separator();
+    }
+    ImGui::TreePop();
 }
 
 } // namespace
@@ -256,6 +431,11 @@ void draw() noexcept {
     draw_steps(roteiro);
     ImGui::Spacing();
     draw_selected(roteiro);
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    draw_subtitles(roteiro);
+    draw_share(roteiro);
 }
 
 } // namespace sunrise::server::ui::playbook

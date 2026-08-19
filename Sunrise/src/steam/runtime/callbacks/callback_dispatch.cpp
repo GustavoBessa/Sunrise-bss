@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "../../../client/content/investment/worker.h"
+#include "../../../client/content/strings/subtitle_catalog.h"
 #include "../../../client/hooks/membership_probe/membership_probe.h"
 #include "../../../client/playbook/playbook.h"
 #include "../../../core/logging/log.h"
@@ -126,6 +127,8 @@ void run_callbacks() noexcept {
         // Read-only against the game. It samples the player's location and fires the roteiro's
         // steps, so it has to run whether or not the interface is open.
         client::playbook::service(now);
+        // One string container per slice while a catalog build is running, and nothing otherwise.
+        client::content::strings::catalog::service(now);
     }
 }
 

@@ -25,9 +25,13 @@ inline constexpr std::uint32_t kNoAudioTag = 0;
 /**
  * One located step of a mission roteiro.
  *
- * A step is matched by destination, bubble, nearest-spawn hash, and distance to `position`. The
- * region and slice-set fields are recorded for reference and take no part in the match: the slice
- * set moves with activity progress, so keying on it would stop a step from firing on a replay.
+ * A step is matched by destination, bubble, and distance to `position` -- and by nothing else.
+ * Every other field is recorded for reference:
+ *  - the slice set moves with activity progress, so keying on it would stop a step from firing on
+ *    a replay;
+ *  - the nearest-spawn hash is a pure function of position within the map, so it adds no
+ *    discrimination over the distance test, while the boundary between two spawn points crossing a
+ *    step's radius would stop it firing where it was captured.
  */
 struct Step {
     /** Player position captured here. The match measures distance from this. */
@@ -36,8 +40,14 @@ struct Step {
     std::uint32_t bubble{};
     /** That bubble's name hash, kept so a step stays readable before the layout loads. */
     std::uint32_t bubbleHash{};
-    /** Nearest spawn set's name hash. Part of the match. */
+    /** Nearest spawn set's name hash, or zero when none was known. The step's readable anchor. */
     std::uint32_t spawnHash{};
+    /**
+     * Localized string this step shows, or zero for none.
+     * The text is resolved from the subtitle catalog, so a step carries the hash and not the words:
+     * the words belong to the installed game, and a shared playbook must not ship them.
+     */
+    std::uint32_t subtitleHash{};
     /** Slice-set state observed at capture. Reference only. */
     std::uint32_t sliceState{};
     /** Region index observed at capture. Reference only. */
@@ -53,6 +63,17 @@ struct Step {
     bool reached{};
 };
 
+/** One free-text metadata value carried by a shared roteiro. */
+struct Metadata {
+    std::array<char, kMetadataCapacity> value{};
+    std::uint8_t length{};
+};
+
+/** @param value Metadata to read. @return Its text as a bounded view. */
+[[nodiscard]] inline std::string_view value_of(const Metadata& value) noexcept {
+    return {value.value.data(), value.length};
+}
+
 /** One destination's roteiro, in the order its steps were captured. */
 struct Roteiro {
     std::array<Step, kStepCapacity> steps{};
@@ -60,10 +81,20 @@ struct Roteiro {
     /** Destination the roteiro belongs to, which is also its file name. */
     std::array<char, state::build_data::scenarios::kNameCapacity> destination{};
     std::uint8_t destinationLength{};
+    /** Who authored it. Carried so a shared roteiro keeps its credit. */
+    Metadata author{};
+    /** What it covers, in the author's words. */
+    Metadata description{};
+    /** Game build it was captured against, which is what makes a mismatch explainable. */
+    Metadata gameBuild{};
 };
 
 /** Bytes of one announcement line, including its null. */
 inline constexpr std::size_t kAnnouncementCapacity = 128;
+/** Bytes of one shown subtitle, without a null. Long enough for a line of dialogue. */
+inline constexpr std::size_t kSubtitleCapacity = 200;
+/** Bytes of one metadata value, without a null. */
+inline constexpr std::size_t kMetadataCapacity = 96;
 
 /**
  * The most recently fired step, worded for the screen.
@@ -73,10 +104,18 @@ inline constexpr std::size_t kAnnouncementCapacity = 128;
  */
 struct Announcement {
     std::array<char, kAnnouncementCapacity> text{};
+    /** The step's subtitle, resolved when the catalog holds it. Empty otherwise. */
+    std::array<char, kSubtitleCapacity> subtitle{};
+    std::uint8_t subtitleLength{};
     /** Tick the step fired on, which is what the overlay measures its hold against. */
     std::uint64_t firedTick{};
     bool present{};
 };
+
+/** @param value Announcement to read. @return Its subtitle as a bounded view. */
+[[nodiscard]] inline std::string_view subtitle_of(const Announcement& value) noexcept {
+    return {value.subtitle.data(), value.subtitleLength};
+}
 
 /** @param value Step to read. @return Its label as a bounded view. */
 [[nodiscard]] inline std::string_view label_of(const Step& value) noexcept {

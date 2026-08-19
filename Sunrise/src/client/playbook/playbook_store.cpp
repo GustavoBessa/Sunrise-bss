@@ -23,13 +23,15 @@
 namespace sunrise::client::playbook::internal {
 namespace {
 
-/** Fields every step line carries, in order. */
-constexpr std::size_t kFieldCount = 11;
+/** Fields a version-1 step line carries. The label is the last one. */
+constexpr std::size_t kFieldCountV1 = 11;
+/** Fields a version-2 step line carries: version 1 plus the subtitle column. */
+constexpr std::size_t kFieldCountV2 = 12;
 /** Longest single field, which bounds the null-terminated copy a numeric parse needs. */
 constexpr std::size_t kFieldCapacity = 64;
 
-/** One step line split into its fields. */
-using Fields = std::array<std::string_view, kFieldCount>;
+/** One step line split into its fields. Version 1 leaves the last slot unused. */
+using Fields = std::array<std::string_view, kFieldCountV2>;
 
 /** @param value Candidate byte. @return True for a byte a package name may hold. */
 [[nodiscard]] bool name_byte(char value) noexcept {
@@ -116,10 +118,11 @@ using Fields = std::array<std::string_view, kFieldCount>;
  * @param output Receives the fields.
  * @return True when the line holds exactly the expected field count.
  */
-[[nodiscard]] bool split(std::string_view line, Fields& output) noexcept {
+[[nodiscard]] bool split(std::string_view line, std::size_t fieldCount, Fields& output) noexcept {
+    output = {};
     std::size_t count = 0;
     std::size_t begin = 0;
-    while (count + 1 < kFieldCount) {
+    while (count + 1 < fieldCount) {
         const std::size_t comma = line.find(',', begin);
         if (comma == std::string_view::npos) {
             return false;
@@ -138,9 +141,10 @@ using Fields = std::array<std::string_view, kFieldCount>;
  * @param output Receives the step only when every field is valid.
  * @return True when the line is one complete step.
  */
-[[nodiscard]] bool parse_step(std::string_view line, Step& output) noexcept {
+[[nodiscard]] bool parse_step(std::string_view line, bool withSubtitle, Step& output) noexcept {
     Fields fields{};
-    if (!split(line, fields)) {
+    const std::size_t fieldCount = withSubtitle ? kFieldCountV2 : kFieldCountV1;
+    if (!split(line, fieldCount, fields)) {
         return false;
     }
     Step step{};
@@ -154,19 +158,66 @@ using Fields = std::array<std::string_view, kFieldCount>;
         || !float_field(fields[8], step.radius)) {
         return false;
     }
+    // Version 1 has no subtitle column, so the audio and label columns shift down by one.
+    const std::size_t subtitleField = 9;
+    const std::size_t audioField = withSubtitle ? 10 : 9;
+    const std::size_t labelField = withSubtitle ? 11 : 10;
+    if (withSubtitle && !fields[subtitleField].empty()
+        && !unsigned_field(fields[subtitleField], step.subtitleHash)) {
+        return false;
+    }
     // An empty audio column is the normal state today, so it reads as "no sound" rather than
     // failing the line.
-    if (!fields[9].empty() && !unsigned_field(fields[9], step.audioTag)) {
+    if (!fields[audioField].empty() && !unsigned_field(fields[audioField], step.audioTag)) {
         return false;
     }
     if (step.radius < kMinimumRadius || step.radius > kMaximumRadius) {
         return false;
     }
-    const std::size_t labelLength = (std::min)(fields[10].size(), step.label.size());
-    std::copy_n(fields[10].begin(), labelLength, step.label.begin());
+    const std::size_t labelLength = (std::min)(fields[labelField].size(), step.label.size());
+    std::copy_n(fields[labelField].begin(), labelLength, step.label.begin());
     step.labelLength = static_cast<std::uint8_t>(labelLength);
     output = step;
     return true;
+}
+
+/** Stores one metadata value, dropping bytes a single line cannot carry. */
+void store_metadata(std::string_view value, Metadata& output) noexcept {
+    output = {};
+    for (const char byte : value) {
+        if (output.length >= output.value.size()) {
+            break;
+        }
+        if (byte >= ' ' && byte <= '~') {
+            output.value[output.length++] = byte;
+        }
+    }
+}
+
+/**
+ * Reads one `# key value` comment line into the roteiro's metadata.
+ * A key this build does not know is ignored, which is what keeps the format additive.
+ * @param line Comment line, `#` included.
+ * @param output Roteiro receiving the value.
+ */
+void read_metadata(std::string_view line, Roteiro& output) noexcept {
+    std::string_view rest = line.substr(1);
+    while (!rest.empty() && rest.front() == ' ') {
+        rest.remove_prefix(1);
+    }
+    const std::size_t space = rest.find(' ');
+    if (space == std::string_view::npos) {
+        return;
+    }
+    const std::string_view key = rest.substr(0, space);
+    const std::string_view value = rest.substr(space + 1);
+    if (key == "author") {
+        store_metadata(value, output.author);
+    } else if (key == "description") {
+        store_metadata(value, output.description);
+    } else if (key == "game_build") {
+        store_metadata(value, output.gameBuild);
+    }
 }
 
 /**
@@ -191,10 +242,17 @@ using Fields = std::array<std::string_view, kFieldCount>;
                <= 0) {
         return false;
     }
+    std::array<char, 16> subtitle{};
+    if (step.subtitleHash != 0
+        && std::snprintf(
+               subtitle.data(), subtitle.size(), "0x%08X", static_cast<unsigned>(step.subtitleHash))
+               <= 0) {
+        return false;
+    }
     const int written =
         std::snprintf(document.data() + used,
                       document.size() - used,
-                      "%zu,%u,%u,%d,0x%08X,%.3f,%.3f,%.3f,%.1f,%s,%.*s\r\n",
+                      "%zu,%u,%u,%d,0x%08X,%.3f,%.3f,%.3f,%.1f,%s,%s,%.*s\r\n",
                       ordinal,
                       static_cast<unsigned>(step.bubble),
                       static_cast<unsigned>(step.sliceState),
@@ -204,6 +262,7 @@ using Fields = std::array<std::string_view, kFieldCount>;
                       static_cast<double>(step.position[1]),
                       static_cast<double>(step.position[2]),
                       static_cast<double>(step.radius),
+                      subtitle.data(),
                       audio.data(),
                       static_cast<int>(label.size()),
                       label.data());
@@ -285,6 +344,7 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
 
     std::string_view text(document.data(), read);
     bool header = false;
+    bool withSubtitle = false;
     std::size_t skipped = 0;
     while (!text.empty()) {
         const std::size_t breakAt = text.find('\n');
@@ -293,11 +353,18 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
-        if (line.empty() || line.front() == '#') {
+        if (line.empty()) {
+            continue;
+        }
+        if (line.front() == '#') {
+            // Metadata rides in comments, so a build that does not know a key still loads the file.
+            read_metadata(line, output);
             continue;
         }
         if (!header) {
-            if (line != kMagic) {
+            if (line == kMagicV2) {
+                withSubtitle = true;
+            } else if (line != kMagicV1) {
                 report_fail("load", "magic");
                 return false;
             }
@@ -309,7 +376,7 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
             break;
         }
         Step step{};
-        if (!parse_step(line, step)) {
+        if (!parse_step(line, withSubtitle, step)) {
             ++skipped;
             continue;
         }
@@ -329,16 +396,28 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
 bool save(const wchar_t* path, const Roteiro& value) noexcept {
     auto document = std::array<char, kFileCapacity>{};
     std::size_t used = 0;
+    const std::string_view author = value_of(value.author);
+    const std::string_view description = value_of(value.description);
+    const std::string_view gameBuild = value_of(value.gameBuild);
     const int header = std::snprintf(document.data(),
                                      document.size(),
                                      "%.*s\r\n"
                                      "# destination %.*s\r\n"
+                                     "# author %.*s\r\n"
+                                     "# description %.*s\r\n"
+                                     "# game_build %.*s\r\n"
                                      "# step,bubble,slice,region,spawn_hash,x,y,z,radius,"
-                                     "audio_tag,label\r\n",
-                                     static_cast<int>(kMagic.size()),
-                                     kMagic.data(),
+                                     "subtitle_hash,audio_tag,label\r\n",
+                                     static_cast<int>(kMagicV2.size()),
+                                     kMagicV2.data(),
                                      static_cast<int>(destination_of(value).size()),
-                                     destination_of(value).data());
+                                     destination_of(value).data(),
+                                     static_cast<int>(author.size()),
+                                     author.data(),
+                                     static_cast<int>(description.size()),
+                                     description.data(),
+                                     static_cast<int>(gameBuild.size()),
+                                     gameBuild.data());
     if (header <= 0 || static_cast<std::size_t>(header) >= document.size()) {
         report_fail("save", "header");
         return false;

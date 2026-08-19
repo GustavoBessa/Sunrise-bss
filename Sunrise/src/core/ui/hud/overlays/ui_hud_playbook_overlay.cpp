@@ -23,6 +23,8 @@ namespace book = client::playbook;
 constexpr std::uint64_t kHoldMs = 6'000;
 /** Shown while the roteiro has fired nothing yet, so the enabled overlay is never an empty box. */
 constexpr char kIdle[] = "no step reached yet";
+/** Subtitle wrap width, in font sizes, so it scales with the interface instead of the viewport. */
+constexpr float kSubtitleWrapEms = 24.0F;
 
 } // namespace
 
@@ -41,6 +43,14 @@ void draw() noexcept {
         return;
     }
     ImGui::TextUnformatted(announcement.text.data());
+    const std::string_view subtitle = book::subtitle_of(announcement);
+    if (subtitle.empty()) {
+        return;
+    }
+    // Wrapped, because a line of dialogue is longer than the step line above it.
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * kSubtitleWrapEms);
+    ImGui::TextUnformatted(subtitle.data(), subtitle.data() + subtitle.size());
+    ImGui::PopTextWrapPos();
 }
 
 } // namespace sunrise::core::ui::hud::overlays::playbook

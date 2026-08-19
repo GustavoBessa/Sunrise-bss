@@ -12,8 +12,14 @@ namespace sunrise::client::playbook::internal {
 inline constexpr std::wstring_view kDirectorySuffix = L"\\playbooks";
 /** Extension every roteiro file carries. */
 inline constexpr std::wstring_view kFileExtension = L".csv";
-/** First line of every roteiro file, which also carries the layout version. */
-inline constexpr std::string_view kMagic = "sunrise_playbook 1";
+/**
+ * First line of every roteiro file, which also carries the layout version.
+ *
+ * Version 1 has no subtitle column. It is still read, because roteiros captured before subtitles
+ * existed must keep working. Everything written from here on is version 2.
+ */
+inline constexpr std::string_view kMagicV1 = "sunrise_playbook 1";
+inline constexpr std::string_view kMagicV2 = "sunrise_playbook 2";
 /** Longest line one step occupies, including its terminator. */
 inline constexpr std::size_t kLineCapacity = 256;
 /** Largest roteiro file accepted into fixed storage. The extra lines cover the header. */

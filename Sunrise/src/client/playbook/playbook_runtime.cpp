@@ -17,6 +17,7 @@
 #include <string_view>
 
 #include "../../core/logging/log.h"
+#include "../content/strings/subtitle_catalog.h"
 #include "../diagnostics/activity_location.h"
 #include "internal.h"
 
@@ -83,14 +84,20 @@ void ensure_destination_locked(std::string_view destination) noexcept {
 
 /**
  * Tests one step against a sampled location.
+ *
+ * The nearest-spawn hash is deliberately NOT a term. It is a pure function of position within the
+ * map, so given the bubble and the distance test it adds no discrimination at all -- while the
+ * boundary between two spawn points can cross a step's radius, which would stop the step from
+ * firing with the player standing exactly where it was captured. It is recorded as the step's
+ * readable anchor, not used to match.
+ *
  * @param step Step to test.
  * @param sampled Current location, already known to be in world.
- * @return True when the player is close enough, in the right bubble, by the right spawn.
+ * @return True when the player is in the right bubble and close enough to the captured position.
  */
 [[nodiscard]] bool matches(const Step& step, const location::Location& sampled) noexcept {
-    return !step.reached && sampled.bubbleValid && sampled.spawnFound && sampled.positionPresent
+    return !step.reached && sampled.bubbleValid && sampled.positionPresent
            && step.bubble == static_cast<std::uint32_t>(sampled.bubble)
-           && step.spawnHash == sampled.spawnHash
            && distance_squared(step.position, sampled.position) <= step.radius * step.radius;
 }
 
@@ -106,10 +113,22 @@ void ensure_destination_locked(std::string_view destination) noexcept {
  */
 void build_announcement(std::size_t ordinal,
                         std::size_t count,
-                        std::string_view label,
+                        const Step& step,
                         std::uint64_t now,
                         Announcement& output) noexcept {
     output = {};
+    const std::string_view label = label_of(step);
+    if (step.subtitleHash != 0) {
+        // Resolved here rather than in the overlay, so the text is fixed at the moment the step
+        // fired and cannot change under a catalog rebuild while it is on screen.
+        content::strings::catalog::Match match{};
+        if (content::strings::catalog::text_for(step.subtitleHash, match)) {
+            const std::size_t length =
+                (std::min)(static_cast<std::size_t>(match.length), output.subtitle.size());
+            std::copy_n(match.text.begin(), length, output.subtitle.begin());
+            output.subtitleLength = static_cast<std::uint8_t>(length);
+        }
+    }
     const char* prefix = "Step";
     if (ordinal == 1) {
         prefix = "Start";
@@ -155,6 +174,19 @@ void report_fired(std::size_t ordinal, const Step& step) noexcept {
 void rearm_locked() noexcept {
     for (std::size_t index = 0; index < g_roteiro.count; ++index) {
         g_roteiro.steps[index].reached = false;
+    }
+}
+
+/** Copies authored text into fixed metadata storage, dropping bytes a line cannot carry. */
+void store_text(std::string_view source, Metadata& output) noexcept {
+    output = {};
+    for (const char byte : source) {
+        if (output.length >= output.value.size()) {
+            break;
+        }
+        if (byte >= ' ' && byte <= '~' && byte != ',') {
+            output.value[output.length++] = byte;
+        }
     }
 }
 
@@ -228,7 +260,7 @@ void service(std::uint64_t now) noexcept {
         report_fired(index + 1, step);
         // Overlapping radii can fire more than one step in a tick. The last one wins the screen,
         // and the log carries every one of them.
-        build_announcement(index + 1, g_roteiro.count, label_of(step), now, g_announcement);
+        build_announcement(index + 1, g_roteiro.count, step, now, g_announcement);
     }
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -247,8 +279,9 @@ bool capture(std::string_view label) noexcept {
     if (!location::sample(sampled)) {
         return false;
     }
-    // Every one of these is part of the match, so a step missing any of them could never fire.
-    if (!sampled.bubbleValid || !sampled.spawnFound || !sampled.positionPresent) {
+    // These two are the match terms, so a step missing either could never fire. The nearest spawn
+    // is only the step's readable anchor, so it is recorded when known and skipped when not.
+    if (!sampled.bubbleValid || !sampled.positionPresent) {
         internal::report_fail("capture", "location");
         return false;
     }
@@ -262,7 +295,7 @@ bool capture(std::string_view label) noexcept {
     step.position = sampled.position;
     step.bubble = static_cast<std::uint32_t>(sampled.bubble);
     step.bubbleHash = sampled.bubbleHash;
-    step.spawnHash = sampled.spawnHash;
+    step.spawnHash = sampled.spawnFound ? sampled.spawnHash : 0U;
     step.sliceState = sampled.sliceState;
     step.region = sampled.region;
     step.radius = kDefaultRadius;
@@ -321,6 +354,33 @@ bool set_audio_tag(std::size_t index, std::uint32_t audioTag) noexcept {
     return saved;
 }
 
+/** Replaces one step's subtitle and saves the roteiro. */
+bool set_subtitle(std::size_t index, std::uint32_t subtitleHash) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    g_roteiro.steps[index].subtitleHash = subtitleHash;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Replaces one roteiro's metadata and saves it. */
+bool set_metadata(std::string_view author, std::string_view description) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_roteiro.destinationLength == 0) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    store_text(author, g_roteiro.author);
+    store_text(description, g_roteiro.description);
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
 /** Replaces one step's fire radius and saves the roteiro. */
 bool set_radius(std::size_t index, float radius) noexcept {
     if (radius < kMinimumRadius || radius > kMaximumRadius) {
@@ -342,6 +402,14 @@ void rearm() noexcept {
     AcquireSRWLockExclusive(&g_lock);
     rearm_locked();
     // The run starts over, so the step still on screen no longer describes it.
+    g_announcement = {};
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+/** Forces the roteiro to be read from disk on the next slice. */
+void reload() noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    g_loaded = false;
     g_announcement = {};
     ReleaseSRWLockExclusive(&g_lock);
 }

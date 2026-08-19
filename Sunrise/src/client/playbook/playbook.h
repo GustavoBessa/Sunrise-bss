@@ -54,6 +54,21 @@ void service(std::uint64_t now) noexcept;
 [[nodiscard]] bool set_audio_tag(std::size_t index, std::uint32_t audioTag) noexcept;
 
 /**
+ * Replaces one step's subtitle and saves the roteiro.
+ * @param index Step ordinal, below the current count.
+ * @param subtitleHash Localized string to show here, or zero to clear it.
+ * @return True when the ordinal existed and the file was written.
+ */
+[[nodiscard]] bool set_subtitle(std::size_t index, std::uint32_t subtitleHash) noexcept;
+
+/**
+ * Replaces one roteiro's metadata and saves it.
+ * @param author Who authored it. @param description What it covers.
+ * @return True when the file was written.
+ */
+[[nodiscard]] bool set_metadata(std::string_view author, std::string_view description) noexcept;
+
+/**
  * Replaces one step's fire radius and saves the roteiro.
  * @param index Step ordinal, below the current count.
  * @param radius World units, between `kMinimumRadius` and `kMaximumRadius`.
@@ -63,6 +78,14 @@ void service(std::uint64_t now) noexcept;
 
 /** Clears every step's reached latch so the roteiro can be walked again from the start. */
 void rearm() noexcept;
+
+/**
+ * Forces the loaded roteiro to be read from disk on the next slice.
+ *
+ * The runtime only reloads when the destination changes, so anything that rewrites the current
+ * destination's file behind its back has to say so.
+ */
+void reload() noexcept;
 
 /**
  * @return The most recently fired step's announcement, or one reporting nothing has fired.
