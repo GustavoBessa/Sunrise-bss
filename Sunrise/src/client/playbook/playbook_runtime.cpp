@@ -657,6 +657,7 @@ Run run_state(std::uint64_t now) noexcept {
             value.nextWaitMs = waited >= wait ? std::uint64_t{0} : wait - waited;
             continue;
         }
+        value.nextPosition = step.position;
         if (g_lastSample.bubbleValid && g_lastSample.positionPresent
             && step.bubble == static_cast<std::uint32_t>(g_lastSample.bubble)) {
             // Only within one bubble: a straight line across a bubble boundary is not a distance the
@@ -664,7 +665,63 @@ Run run_state(std::uint64_t now) noexcept {
             value.nextDistance =
                 std::sqrt(distance_squared(step.position, g_lastSample.position));
             value.nextDistanceKnown = true;
+            value.nextPositionHere = true;
         }
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return value;
+}
+
+/** Reports the route around the player. */
+Route route_ahead() noexcept {
+    Route value{};
+    AcquireSRWLockShared(&g_lock);
+    value.stepCount = g_roteiro.count;
+    const bool located = g_wasInWorld && g_lastSample.bubbleValid && g_lastSample.positionPresent;
+    if (!located || g_roteiro.count == 0) {
+        ReleaseSRWLockShared(&g_lock);
+        return value;
+    }
+    const auto bubble = static_cast<std::uint32_t>(g_lastSample.bubble);
+
+    // The waypoint the player is standing nearest to is the route's anchor. It is what makes the
+    // markers follow the player back down the path instead of staying at the furthest step reached.
+    std::size_t nearest = 0;
+    float best = 0.0F;
+    for (std::size_t index = 0; index < g_roteiro.count; ++index) {
+        const Step& step = g_roteiro.steps[index];
+        // A timed beat has no place of its own, and a beat in another bubble is not on this stretch.
+        if (step.gate == Gate::delay || step.bubble != bubble) {
+            continue;
+        }
+        const float distance = distance_squared(step.position, g_lastSample.position);
+        if (nearest == 0 || distance < best) {
+            nearest = index + 1;
+            best = distance;
+        }
+    }
+    if (nearest == 0) {
+        ReleaseSRWLockShared(&g_lock);
+        return value;
+    }
+    value.nearestOrdinal = nearest;
+    value.active = true;
+
+    // Standing on a waypoint that has not fired yet, that waypoint is still the one to reach; having
+    // already fired it, the route continues from the next one along.
+    const std::size_t anchor =
+        g_roteiro.steps[nearest - 1].reached ? nearest : nearest - 1;
+    for (std::size_t index = anchor; index < g_roteiro.count && value.count < value.ahead.size();
+         ++index) {
+        const Step& step = g_roteiro.steps[index];
+        if (step.gate == Gate::delay || step.bubble != bubble) {
+            continue;
+        }
+        Waypoint& waypoint = value.ahead[value.count++];
+        waypoint.position = step.position;
+        waypoint.ordinal = index + 1;
+        waypoint.distance = std::sqrt(distance_squared(step.position, g_lastSample.position));
+        waypoint.reached = step.reached;
     }
     ReleaseSRWLockShared(&g_lock);
     return value;

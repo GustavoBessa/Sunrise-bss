@@ -10,6 +10,7 @@
 #include "../scaling/dpi/ui_dpi_scaling.h"
 #include "overlay.h"
 #include "overlays/ui_hud_logo_overlay.h"
+#include "overlays/ui_hud_objective_overlay.h"
 #include "overlays/ui_hud_playbook_overlay.h"
 #include "overlays/ui_hud_session_overlay.h"
 #include "overlays/ui_hud_status_overlay.h"
@@ -26,6 +27,14 @@ struct Entry {
     const char* windowId;
     void (*draw)() noexcept;
     bool startsOn;
+    /**
+     * The entry draws over the whole viewport instead of into a stacked corner window.
+     *
+     * A marker belongs wherever the thing it marks projects to, which is not a corner. Such an entry
+     * is called outside `Begin`, submits into the viewport's foreground draw list, and takes no room
+     * in the stack -- so the corner keeps its layout whether the marker is on or off.
+     */
+    bool viewport;
 };
 
 /** 24 pixels keep the stack clear of the viewport corner, as the other overlays do. */
@@ -46,14 +55,28 @@ constexpr std::size_t kSwitchCount = kOverlayCount + kStatusLineCount;
 
 /** Every overlay, in Overlay order. The menu lists them and the corner stacks them in it. */
 constexpr std::array<Entry, kOverlayCount> kOverlays{
-    Entry{"Sunrise Card", "sunrise_card", "##sunrise_hud_card", &overlays::logo::draw, true},
-    // Both start off: they report what the server is doing, which no ordinary run needs on screen.
     Entry{
-        "Current Status", "current_status", "##sunrise_hud_status", &overlays::status::draw, false},
-    Entry{"Session", "session", "##sunrise_hud_session", &overlays::session::draw, false},
+        "Sunrise Card", "sunrise_card", "##sunrise_hud_card", &overlays::logo::draw, true, false},
+    // Both start off: they report what the server is doing, which no ordinary run needs on screen.
+    Entry{"Current Status",
+          "current_status",
+          "##sunrise_hud_status",
+          &overlays::status::draw,
+          false,
+          false},
+    Entry{"Session", "session", "##sunrise_hud_session", &overlays::session::draw, false, false},
     // On by default: a roteiro that announces nothing would look broken, and it stays quiet until
     // a step is actually reached.
-    Entry{"Playbook", "playbook", "##sunrise_hud_playbook", &overlays::playbook::draw, true},
+    Entry{
+        "Playbook", "playbook", "##sunrise_hud_playbook", &overlays::playbook::draw, true, false},
+    // Drawn over the world rather than in the corner, and on by default for the same reason as the
+    // playbook line: a roteiro you cannot see the way to is a roteiro you cannot follow.
+    Entry{"Objective Marker",
+          "objective_marker",
+          "##sunrise_hud_objective",
+          &overlays::objective::draw,
+          true,
+          true},
 };
 
 /** One status line's identity and starting switch state. */
@@ -212,6 +235,12 @@ bool draw(bool interfaceEnabled) noexcept {
     bool drawn = false;
     for (std::size_t index = 0; index < kOverlayCount; ++index) {
         if (!g_enabled[index]) {
+            continue;
+        }
+        if (kOverlays[index].viewport) {
+            // No window and no stack advance: it draws wherever the world puts it.
+            kOverlays[index].draw();
+            drawn = true;
             continue;
         }
         position.y += draw_overlay(kOverlays[index], position) + gap;

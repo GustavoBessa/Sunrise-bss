@@ -14,6 +14,8 @@ enum class Overlay : std::uint8_t {
     session,
     /** The roteiro step the player has just reached, if any. */
     playbook,
+    /** A marker over the world where the roteiro's next beat is. */
+    objectiveMarker,
     count,
 };
 

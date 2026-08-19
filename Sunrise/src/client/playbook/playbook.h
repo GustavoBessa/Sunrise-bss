@@ -177,6 +177,13 @@ struct Run {
     /** That step's label, which is the only human-readable name a beat has. */
     std::array<char, kLabelCapacity> nextLabel{};
     std::uint8_t nextLabelLength{};
+    /** Where the next step is, in world units. This is what an on-screen marker is drawn at. */
+    diagnostics::activity_location::Position nextPosition{};
+    /**
+     * The next step is in the bubble the player is in, so its position is somewhere they can reach.
+     * A position from another bubble belongs to another part of the map and must not be marked.
+     */
+    bool nextPositionHere{};
     /** How far the player is from the next step, in world units. */
     float nextDistance{};
     /**
@@ -202,5 +209,52 @@ struct Run {
  * recent slice rather than a fresh one, so reading this every frame costs no extra sampling.
  */
 [[nodiscard]] Run run_state(std::uint64_t now) noexcept;
+
+/** Waypoints of the route the marker draws ahead of the player. */
+inline constexpr std::size_t kRouteAheadCapacity = 4;
+
+/** One waypoint of the route. */
+struct Waypoint {
+    diagnostics::activity_location::Position position{};
+    /** One-based position in the roteiro. */
+    std::size_t ordinal{};
+    /** Straight-line distance from the player, in world units. */
+    float distance{};
+    /** The step has already fired in this run. */
+    bool reached{};
+};
+
+/**
+ * The stretch of the route around where the player is standing.
+ *
+ * A roteiro is a linear path, and guidance along it is driven by **where the player is**, not by what
+ * has already fired. Those differ the moment the player turns around: with a latch-driven marker,
+ * walking back down the route leaves the marker pinned to the far end, which is precisely when a
+ * marker is least useful. Anchoring on the nearest waypoint instead makes the markers walk back with
+ * the player, so the path stays readable in both directions.
+ *
+ * Firing is untouched by this: a step still fires once per run, and a sequential roteiro still holds
+ * its order. This decides only what the player is *shown*.
+ */
+struct Route {
+    /** Waypoints from the player's place on the route forwards, nearest first. */
+    std::array<Waypoint, kRouteAheadCapacity> ahead{};
+    std::size_t count{};
+    /** One-based waypoint the player is standing nearest to, or zero when none is in this bubble. */
+    std::size_t nearestOrdinal{};
+    /** Steps the roteiro holds. */
+    std::size_t stepCount{};
+    /** The player is in a world with a roteiro whose route reaches this bubble. */
+    bool active{};
+};
+
+/**
+ * @return The route around the player. Only waypoints in the bubble the player is in are reported:
+ * a straight line across a bubble boundary points through the map rather than along it.
+ *
+ * Measured against the location sampled on the most recent slice, so drawing this every frame costs
+ * no extra sampling.
+ */
+[[nodiscard]] Route route_ahead() noexcept;
 
 } // namespace sunrise::client::playbook
