@@ -3,6 +3,10 @@
  * reached, once each per run, announcing the first and the last one differently so the start and
  * the end of a roteiro are distinguishable on screen.
  *
+ * A sequential roteiro is a script rather than a set of points: a step waits on the one before it,
+ * which is also what lets a step be gated on time instead of place. The run clock those waits are
+ * measured against is stamped here, on entering the world, because the game exposes none that serves.
+ *
  * Nothing plays a sound yet. A step's audio tag is carried and reported; the emit path is the one
  * piece that does not exist, and this is where it plugs in.
  */
@@ -13,13 +17,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <string_view>
 
 #include "../../core/logging/log.h"
-#include "../content/strings/subtitle_catalog.h"
 #include "../diagnostics/activity_location.h"
 #include "internal.h"
+#include "playbook_dialogue.h"
 
 namespace sunrise::client::playbook {
 namespace {
@@ -33,6 +38,22 @@ core::path::Buffer g_directory{};
 bool g_directoryResolved{};
 /** Set once a destination's file was looked for, so a missing file is not retried per frame. */
 bool g_loaded{};
+/** Tick the player entered the world on, which is the run clock's zero. */
+std::uint64_t g_runStart{};
+/** Whether the player was in a world on the previous slice, so the entry edge can be seen. */
+bool g_wasInWorld{};
+/** Tick the most recent step fired on, which is what a `delay` gate waits from. */
+std::uint64_t g_lastFiredTick{};
+/** Set once any step has fired this run, so a `delay` gate has something to follow. */
+bool g_anyFired{};
+/**
+ * The location sampled on the most recent slice.
+ *
+ * Kept so the run tracker can measure the distance to the next step without sampling again. The HUD
+ * reads the tracker every frame and the slice already sampled this tick, so a second sample would
+ * buy nothing but the cost of the nearest-spawn search behind it.
+ */
+location::Location g_lastSample{};
 
 /** Writes one step's file path into caller storage. @return True when the path was built. */
 [[nodiscard]] bool current_path(std::string_view destination, core::path::Buffer& output) noexcept {
@@ -83,7 +104,7 @@ void ensure_destination_locked(std::string_view destination) noexcept {
 }
 
 /**
- * Tests one step against a sampled location.
+ * Tests whether the player has reached one step's captured position.
  *
  * The nearest-spawn hash is deliberately NOT a term. It is a pure function of position within the
  * map, so given the bubble and the distance test it adds no discrimination at all -- while the
@@ -95,10 +116,52 @@ void ensure_destination_locked(std::string_view destination) noexcept {
  * @param sampled Current location, already known to be in world.
  * @return True when the player is in the right bubble and close enough to the captured position.
  */
-[[nodiscard]] bool matches(const Step& step, const location::Location& sampled) noexcept {
-    return !step.reached && sampled.bubbleValid && sampled.positionPresent
+[[nodiscard]] bool at_place(const Step& step, const location::Location& sampled) noexcept {
+    return sampled.bubbleValid && sampled.positionPresent
            && step.bubble == static_cast<std::uint32_t>(sampled.bubble)
            && distance_squared(step.position, sampled.position) <= step.radius * step.radius;
+}
+
+/**
+ * Tests whether one step's wait has elapsed since the previous step fired.
+ *
+ * A timed step with nothing before it never fires: without a previous step there is no moment to
+ * measure from, and firing it on world entry would be a different behaviour from the one authored.
+ *
+ * @param step Step to test.
+ * @param now Monotonic tick count in milliseconds.
+ * @return True when a step has fired this run and the wait has passed.
+ */
+[[nodiscard]] bool after_wait(const Step& step, std::uint64_t now) noexcept {
+    const std::uint64_t wait =
+        static_cast<std::uint64_t>((std::min)(step.delayMs, kMaximumDelayMs));
+    // Unsigned arithmetic, so a tick captured before this read reports as no time passed rather
+    // than as a wait long enough to fire everything at once.
+    return g_anyFired && now >= g_lastFiredTick && now - g_lastFiredTick >= wait;
+}
+
+/**
+ * Tests one step for firing. Runs under the lock.
+ *
+ * In a sequential roteiro only the next unfired step is eligible, which is what makes the roteiro a
+ * script: reaching the end of a mission early cannot skip its middle.
+ *
+ * @param index Step ordinal.
+ * @param sampled Current location, already known to be in world.
+ * @param now Monotonic tick count in milliseconds.
+ * @return True when the step should fire on this slice.
+ */
+[[nodiscard]] bool matches_locked(std::size_t index,
+                                 const location::Location& sampled,
+                                 std::uint64_t now) noexcept {
+    const Step& step = g_roteiro.steps[index];
+    if (step.reached) {
+        return false;
+    }
+    if (g_roteiro.sequential && index != 0 && !g_roteiro.steps[index - 1].reached) {
+        return false;
+    }
+    return step.gate == Gate::delay ? after_wait(step, now) : at_place(step, sampled);
 }
 
 /**
@@ -118,17 +181,8 @@ void build_announcement(std::size_t ordinal,
                         Announcement& output) noexcept {
     output = {};
     const std::string_view label = label_of(step);
-    if (step.subtitleHash != 0) {
-        // Resolved here rather than in the overlay, so the text is fixed at the moment the step
-        // fired and cannot change under a catalog rebuild while it is on screen.
-        content::strings::catalog::Match match{};
-        if (content::strings::catalog::text_for(step.subtitleHash, match)) {
-            const std::size_t length =
-                (std::min)(static_cast<std::size_t>(match.length), output.subtitle.size());
-            std::copy_n(match.text.begin(), length, output.subtitle.begin());
-            output.subtitleLength = static_cast<std::uint8_t>(length);
-        }
-    }
+    // The spoken line is not filled here: it changes while this announcement is on screen, so the
+    // dialogue clock writes it into every copy handed out instead.
     const char* prefix = "Step";
     if (ordinal == 1) {
         prefix = "Start";
@@ -170,11 +224,14 @@ void report_fired(std::size_t ordinal, const Step& step) noexcept {
     }
 }
 
-/** Drops every step's reached latch. */
+/** Drops every step's reached latch and the run's fire history. */
 void rearm_locked() noexcept {
     for (std::size_t index = 0; index < g_roteiro.count; ++index) {
         g_roteiro.steps[index].reached = false;
     }
+    // A `delay` gate measures from the previous step of *this* run, so the history goes with it.
+    g_lastFiredTick = 0;
+    g_anyFired = false;
 }
 
 /** Copies authored text into fixed metadata storage, dropping bytes a line cannot carry. */
@@ -205,6 +262,11 @@ void initialize(void* module) noexcept {
     g_roteiro = {};
     g_announcement = {};
     g_loaded = false;
+    g_runStart = 0;
+    g_wasInWorld = false;
+    g_lastFiredTick = 0;
+    g_anyFired = false;
+    g_lastSample = {};
     g_directory = {};
     g_directoryResolved = core::path::artifact_directory(module, g_directory)
                           && core::path::append(g_directory, internal::kDirectorySuffix);
@@ -223,10 +285,16 @@ void initialize(void* module) noexcept {
 
 /** Drops the loaded roteiro and the resolved directory. */
 void shutdown() noexcept {
+    dialogue::stop();
     AcquireSRWLockExclusive(&g_lock);
     g_roteiro = {};
     g_announcement = {};
     g_loaded = false;
+    g_runStart = 0;
+    g_wasInWorld = false;
+    g_lastFiredTick = 0;
+    g_anyFired = false;
+    g_lastSample = {};
     g_directory = {};
     g_directoryResolved = false;
     ReleaseSRWLockExclusive(&g_lock);
@@ -237,13 +305,22 @@ void service(std::uint64_t now) noexcept {
     location::Location sampled{};
     // Sampled before the lock: it reads published State and never touches playbook storage.
     const bool inWorld = location::sample(sampled);
+    // Advanced before this module's lock is taken, so the two are only ever held in this order.
+    dialogue::service(now);
 
     AcquireSRWLockExclusive(&g_lock);
+    g_lastSample = sampled;
     if (!inWorld) {
         // Leaving the world ends the run, so the roteiro can be walked again on the next entry.
         rearm_locked();
+        g_wasInWorld = false;
         ReleaseSRWLockExclusive(&g_lock);
         return;
+    }
+    if (!g_wasInWorld) {
+        // The run clock's zero. The game has none that serves, so this edge is where it is stamped.
+        g_wasInWorld = true;
+        g_runStart = now;
     }
     const std::string_view destination = location::destination_of(sampled);
     if (destination.empty()) {
@@ -251,18 +328,30 @@ void service(std::uint64_t now) noexcept {
         return;
     }
     ensure_destination_locked(destination);
+    // Beats fired on this slice, collected so dialogue starts after this module's lock is dropped.
+    Step spoken{};
+    bool speak = false;
     for (std::size_t index = 0; index < g_roteiro.count; ++index) {
-        Step& step = g_roteiro.steps[index];
-        if (!matches(step, sampled)) {
+        if (!matches_locked(index, sampled, now)) {
             continue;
         }
+        Step& step = g_roteiro.steps[index];
         step.reached = true;
+        g_lastFiredTick = now;
+        g_anyFired = true;
         report_fired(index + 1, step);
         // Overlapping radii can fire more than one step in a tick. The last one wins the screen,
         // and the log carries every one of them.
         build_announcement(index + 1, g_roteiro.count, step, now, g_announcement);
+        if (step.lineCount != 0) {
+            spoken = step;
+            speak = true;
+        }
     }
     ReleaseSRWLockExclusive(&g_lock);
+    if (speak) {
+        dialogue::start(spoken, now);
+    }
 }
 
 /** Copies the loaded roteiro. */
@@ -300,6 +389,8 @@ bool capture(std::string_view label) noexcept {
     step.region = sampled.region;
     step.radius = kDefaultRadius;
     step.audioTag = kNoAudioTag;
+    // A capture is by definition a place the author stood in, so the gate follows from the act.
+    step.gate = Gate::place;
     // A captured step counts as reached: the player is standing on it, and announcing it now would
     // fire the roteiro's own start the moment it is authored.
     step.reached = true;
@@ -318,6 +409,11 @@ bool capture(std::string_view label) noexcept {
         ReleaseSRWLockExclusive(&g_lock);
         internal::report_fail("capture", "capacity");
         return false;
+    }
+    if (g_roteiro.count == 0) {
+        // A roteiro being authored from nothing is a mission, so it starts out as a script. One that
+        // already had steps keeps whatever its file said, so nothing you already tested changes.
+        g_roteiro.sequential = true;
     }
     g_roteiro.steps[g_roteiro.count++] = step;
     const bool saved = save_locked();
@@ -354,17 +450,116 @@ bool set_audio_tag(std::size_t index, std::uint32_t audioTag) noexcept {
     return saved;
 }
 
-/** Replaces one step's subtitle and saves the roteiro. */
-bool set_subtitle(std::size_t index, std::uint32_t subtitleHash) noexcept {
+/** Appends one spoken line to a step and saves the roteiro. */
+bool append_line(std::size_t index, std::uint32_t subtitleHash) noexcept {
+    if (subtitleHash == 0) {
+        // A line with no words would hold the screen saying nothing.
+        return false;
+    }
     AcquireSRWLockExclusive(&g_lock);
     if (index >= g_roteiro.count) {
         ReleaseSRWLockExclusive(&g_lock);
         return false;
     }
-    g_roteiro.steps[index].subtitleHash = subtitleHash;
+    Step& step = g_roteiro.steps[index];
+    if (step.lineCount >= step.lines.size()) {
+        ReleaseSRWLockExclusive(&g_lock);
+        internal::report_fail("line", "capacity");
+        return false;
+    }
+    step.lines[step.lineCount] = Line{subtitleHash, kDefaultDwellMs};
+    ++step.lineCount;
     const bool saved = save_locked();
     ReleaseSRWLockExclusive(&g_lock);
     return saved;
+}
+
+/** Removes one spoken line from a step and saves the roteiro. */
+bool remove_line(std::size_t index, std::size_t line) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count || line >= g_roteiro.steps[index].lineCount) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    Step& step = g_roteiro.steps[index];
+    for (std::size_t at = line + 1; at < step.lineCount; ++at) {
+        step.lines[at - 1] = step.lines[at];
+    }
+    --step.lineCount;
+    step.lines[step.lineCount] = {};
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Replaces one spoken line's time on screen and saves the roteiro. */
+bool set_line_dwell(std::size_t index, std::size_t line, std::uint16_t dwellMs) noexcept {
+    if (dwellMs < kMinimumDwellMs || dwellMs > kMaximumDwellMs) {
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count || line >= g_roteiro.steps[index].lineCount) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    g_roteiro.steps[index].lines[line].dwellMs = dwellMs;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Replaces what has to happen for one step to fire, and saves the roteiro. */
+bool set_gate(std::size_t index, Gate gate, std::uint16_t delayMs) noexcept {
+    if (gate == Gate::delay && delayMs > kMaximumDelayMs) {
+        return false;
+    }
+    AcquireSRWLockExclusive(&g_lock);
+    if (index >= g_roteiro.count || (gate == Gate::delay && index == 0)) {
+        // A timed first step has nothing to wait on, so it would never fire.
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    Step& step = g_roteiro.steps[index];
+    step.gate = gate;
+    step.delayMs = gate == Gate::delay ? delayMs : 0U;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Replaces whether the roteiro's steps fire in order, and saves it. */
+bool set_sequential(bool sequential) noexcept {
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_roteiro.destinationLength == 0) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return false;
+    }
+    g_roteiro.sequential = sequential;
+    const bool saved = save_locked();
+    ReleaseSRWLockExclusive(&g_lock);
+    return saved;
+}
+
+/** Speaks one step's dialogue now, without the player having to reach it. */
+bool preview(std::size_t index, std::uint64_t now) noexcept {
+    Step spoken{};
+    AcquireSRWLockExclusive(&g_lock);
+    const bool found = index < g_roteiro.count && g_roteiro.steps[index].lineCount != 0;
+    if (found) {
+        spoken = g_roteiro.steps[index];
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    if (!found) {
+        return false;
+    }
+    // No latch moves and no step fires: a preview is for judging pacing, not for walking the run.
+    dialogue::start(spoken, now);
+    return true;
+}
+
+/** Stops a preview, or whatever else is being spoken. */
+void stop_preview() noexcept {
+    dialogue::stop();
 }
 
 /** Replaces one roteiro's metadata and saves it. */
@@ -403,7 +598,10 @@ void rearm() noexcept {
     rearm_locked();
     // The run starts over, so the step still on screen no longer describes it.
     g_announcement = {};
+    // The clock restarts here too, so a rearm mid-run is a fresh run and not a resumed one.
+    g_runStart = GetTickCount64();
     ReleaseSRWLockExclusive(&g_lock);
+    dialogue::stop();
 }
 
 /** Forces the roteiro to be read from disk on the next slice. */
@@ -412,14 +610,75 @@ void reload() noexcept {
     g_loaded = false;
     g_announcement = {};
     ReleaseSRWLockExclusive(&g_lock);
+    // The steps about to be replaced own whatever is being spoken.
+    dialogue::stop();
 }
 
-/** Copies the most recently fired step's announcement. */
+/** Copies the most recently fired step's announcement, with the line currently spoken. */
 Announcement last_announcement() noexcept {
     AcquireSRWLockShared(&g_lock);
-    const Announcement snapshot = g_announcement;
+    Announcement snapshot = g_announcement;
     ReleaseSRWLockShared(&g_lock);
+    // Filled after the release, so the two locks are only ever taken in this order. `present` is
+    // left alone: it means a step fired, and a preview speaks without one. The overlay holds the
+    // step line on a timer and the spoken line on its own, which is what lets a preview show up.
+    dialogue::fill(snapshot);
     return snapshot;
+}
+
+/** Reports where the run stands and what the roteiro is waiting for next. */
+Run run_state(std::uint64_t now) noexcept {
+    Run value{};
+    AcquireSRWLockShared(&g_lock);
+    value.stepCount = g_roteiro.count;
+    value.sequential = g_roteiro.sequential;
+    value.active = g_wasInWorld && g_roteiro.count != 0;
+    value.ageMs = g_wasInWorld && now >= g_runStart ? now - g_runStart : std::uint64_t{0};
+    for (std::size_t index = 0; index < g_roteiro.count; ++index) {
+        const Step& step = g_roteiro.steps[index];
+        if (step.reached) {
+            ++value.reached;
+            continue;
+        }
+        if (value.nextOrdinal != 0) {
+            continue;
+        }
+        // The first unfired step. In a sequential roteiro it is the only one that can fire; in a
+        // free one it is still the best guess at where the author meant the player to go next.
+        value.nextOrdinal = index + 1;
+        value.nextLabel = step.label;
+        value.nextLabelLength = step.labelLength;
+        value.nextIsTimed = step.gate == Gate::delay;
+        if (value.nextIsTimed) {
+            const std::uint64_t wait =
+                static_cast<std::uint64_t>((std::min)(step.delayMs, kMaximumDelayMs));
+            const std::uint64_t waited =
+                g_anyFired && now >= g_lastFiredTick ? now - g_lastFiredTick : std::uint64_t{0};
+            value.nextWaitMs = waited >= wait ? std::uint64_t{0} : wait - waited;
+            continue;
+        }
+        if (g_lastSample.bubbleValid && g_lastSample.positionPresent
+            && step.bubble == static_cast<std::uint32_t>(g_lastSample.bubble)) {
+            // Only within one bubble: a straight line across a bubble boundary is not a distance the
+            // player can walk, and reporting it would send them the wrong way.
+            value.nextDistance =
+                std::sqrt(distance_squared(step.position, g_lastSample.position));
+            value.nextDistanceKnown = true;
+        }
+    }
+    ReleaseSRWLockShared(&g_lock);
+    return value;
+}
+
+/** Reports how long the player has been in the world. */
+std::uint64_t run_age(std::uint64_t now) noexcept {
+    AcquireSRWLockShared(&g_lock);
+    // Unsigned arithmetic, so a tick captured before this read reports zero rather than an age of
+    // several hundred million years.
+    const std::uint64_t age =
+        g_wasInWorld && now >= g_runStart ? now - g_runStart : std::uint64_t{0};
+    ReleaseSRWLockShared(&g_lock);
+    return age;
 }
 
 /** Counts the steps already reached in the current run. */

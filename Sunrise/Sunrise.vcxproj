@@ -221,6 +221,7 @@
     <ClCompile Include="src\client\spawn\spawn_keybind_store.cpp" />
     <ClCompile Include="src\client\playbook\playbook_store.cpp" />
     <ClCompile Include="src\client\playbook\playbook_runtime.cpp" />
+    <ClCompile Include="src\client\playbook\playbook_dialogue.cpp" />
     <ClCompile Include="src\client\playbook\playbook_share.cpp" />
     <ClCompile Include="src\client\content\strings\string_table.cpp" />
     <ClCompile Include="src\client\content\strings\subtitle_catalog.cpp" />
@@ -917,6 +918,7 @@
     <ClInclude Include="src\client\playbook\internal.h" />
     <ClInclude Include="src\client\playbook\playbook.h" />
     <ClInclude Include="src\client\playbook\playbook_share.h" />
+    <ClInclude Include="src\client\playbook\playbook_dialogue.h" />
     <ClInclude Include="src\client\content\blob_read.h" />
     <ClInclude Include="src\client\content\strings\string_table.h" />
     <ClInclude Include="src\client\content\strings\subtitle_catalog.h" />

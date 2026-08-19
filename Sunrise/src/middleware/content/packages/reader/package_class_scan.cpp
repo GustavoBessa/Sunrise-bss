@@ -51,19 +51,21 @@ using SeenSet = std::array<std::uint64_t, kSeenWords>;
 }
 
 /**
- * Reports the matching entries of one package's highest patch.
+ * Reports the wanted entries of one package's highest patch.
  * @param directory Installed packages directory.
  * @param packageId Package id to scan.
- * @param classId Tag class to report.
- * @param visitor Tag consumer.
+ * @param classFilter Tag class to report, or null to report every entry. An inventory of the
+ * installed packages is the same walk as a class scan with the comparison removed, so both go
+ * through here rather than through two copies of the patch and entry-table handling.
+ * @param visitor Entry consumer.
  * @param context Caller context passed to the visitor.
  * @param result Receives this package's totals.
  * @return True when the header, the whole entry table and every visitor call work.
  */
 [[nodiscard]] bool scan_package(std::wstring_view directory,
                                 std::uint16_t packageId,
-                                std::uint32_t classId,
-                                ClassEntryVisitor visitor,
+                                const std::uint32_t* classFilter,
+                                InventoryVisitor visitor,
                                 void* context,
                                 ScanResult& result) noexcept {
     Path stem{};
@@ -102,7 +104,8 @@ using SeenSet = std::array<std::uint64_t, kSeenWords>;
         }
         for (std::size_t position = 0; position < count; ++position) {
             ++result.entries;
-            if (batch[position].reference != classId) {
+            const std::uint32_t entryClass = batch[position].reference;
+            if (classFilter != nullptr && entryClass != *classFilter) {
                 continue;
             }
             ++result.matches;
@@ -110,7 +113,7 @@ using SeenSet = std::array<std::uint64_t, kSeenWords>;
             const std::uint32_t tag =
                 layout::kTagBase + (static_cast<std::uint32_t>(packageId) << layout::kTagEntryBits)
                 + entryIndex;
-            if (!visitor(context, ClassEntry{tag, packageFamily})) {
+            if (!visitor(context, InventoryEntry{tag, entryClass, packageFamily})) {
                 return false;
             }
         }
@@ -131,28 +134,32 @@ struct LegacyVisitor {
     return legacy.visitor(legacy.context, entry.tag);
 }
 
-} // namespace
+/** Class-scan visitor and its caller context, adapted onto the inventory walk. */
+struct ClassAdapter {
+    ClassEntryVisitor visitor{};
+    void* context{};
+};
 
-/** Reports every installed entry of one tag class. */
-bool scan_class(std::wstring_view directory,
-                std::uint32_t classId,
-                ClassVisitor visitor,
-                void* context,
-                ScanResult& result) noexcept {
-    result = {};
-    if (visitor == nullptr) {
-        return false;
-    }
-    LegacyVisitor legacy{visitor, context};
-    return scan_class_entries(directory, classId, &visit_legacy, &legacy, result);
+/** @param context Class adapter. @param entry Inventory match. @return Visitor outcome. */
+[[nodiscard]] bool visit_class(void* context, const InventoryEntry& entry) noexcept {
+    const auto& adapter = *static_cast<const ClassAdapter*>(context);
+    return adapter.visitor(adapter.context, ClassEntry{entry.tag, entry.packageFamily});
 }
 
-/** Reports every installed entry of one tag class with its package family. */
-bool scan_class_entries(std::wstring_view directory,
-                        std::uint32_t classId,
-                        ClassEntryVisitor visitor,
-                        void* context,
-                        ScanResult& result) noexcept {
+/**
+ * Walks every installed package once, reporting the wanted entries of each one's highest patch.
+ * @param directory Installed packages directory.
+ * @param classFilter Tag class to report, or null to report every entry.
+ * @param visitor Entry consumer.
+ * @param context Caller context passed to the visitor.
+ * @param result Receives package, entry, and match totals.
+ * @return True when the walk and every visitor call work.
+ */
+[[nodiscard]] bool scan_directory(std::wstring_view directory,
+                                  const std::uint32_t* classFilter,
+                                  InventoryVisitor visitor,
+                                  void* context,
+                                  ScanResult& result) noexcept {
     result = {};
     if (directory.empty() || visitor == nullptr) {
         return false;
@@ -179,7 +186,7 @@ bool scan_class_entries(std::wstring_view directory,
         if (!parse_leaf(found.cFileName, packageId, patchIndex) || !claim(seen, packageId)) {
             continue;
         }
-        if (!scan_package(directory, packageId, classId, visitor, context, result)) {
+        if (!scan_package(directory, packageId, classFilter, visitor, context, result)) {
             complete = false;
             break;
         }
@@ -188,6 +195,44 @@ bool scan_class_entries(std::wstring_view directory,
         complete = false;
     }
     return FindClose(enumeration) != FALSE && complete;
+}
+
+} // namespace
+
+/** Reports every installed entry of one tag class. */
+bool scan_class(std::wstring_view directory,
+                std::uint32_t classId,
+                ClassVisitor visitor,
+                void* context,
+                ScanResult& result) noexcept {
+    result = {};
+    if (visitor == nullptr) {
+        return false;
+    }
+    LegacyVisitor legacy{visitor, context};
+    return scan_class_entries(directory, classId, &visit_legacy, &legacy, result);
+}
+
+/** Reports every installed entry of one tag class with its package family. */
+bool scan_class_entries(std::wstring_view directory,
+                        std::uint32_t classId,
+                        ClassEntryVisitor visitor,
+                        void* context,
+                        ScanResult& result) noexcept {
+    result = {};
+    if (visitor == nullptr) {
+        return false;
+    }
+    ClassAdapter adapter{visitor, context};
+    return scan_directory(directory, &classId, &visit_class, &adapter, result);
+}
+
+/** Reports every installed entry with the class its package's entry table records for it. */
+bool scan_entries(std::wstring_view directory,
+                  InventoryVisitor visitor,
+                  void* context,
+                  ScanResult& result) noexcept {
+    return scan_directory(directory, nullptr, visitor, context, result);
 }
 
 } // namespace sunrise::middleware::content::packages::reader

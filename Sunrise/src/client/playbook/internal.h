@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <string_view>
 
@@ -15,15 +16,42 @@ inline constexpr std::wstring_view kFileExtension = L".csv";
 /**
  * First line of every roteiro file, which also carries the layout version.
  *
- * Version 1 has no subtitle column. It is still read, because roteiros captured before subtitles
- * existed must keep working. Everything written from here on is version 2.
+ * All three are read, because a roteiro captured against an older build must keep working:
+ *  - version 1 has no subtitle column;
+ *  - version 2 has one subtitle column, which loads as the step's first spoken line;
+ *  - version 3 carries its dialogue on `+` continuation lines and leaves that column empty.
+ *
+ * Everything written from here on is version 3. A version-3 file read by a version-2 build loses its
+ * dialogue, which is the one direction that degrades: `+` lines are not steps, and the reader skips
+ * a line it cannot parse rather than failing the file.
  */
 inline constexpr std::string_view kMagicV1 = "sunrise_playbook 1";
 inline constexpr std::string_view kMagicV2 = "sunrise_playbook 2";
+inline constexpr std::string_view kMagicV3 = "sunrise_playbook 3";
+/**
+ * First byte of a line that adds one spoken line to the step above it.
+ * The form is `+,<subtitle_hash>,<dwell_ms>`.
+ */
+inline constexpr char kLineMarker = '+';
+/**
+ * First byte of a line that makes the step above it wait on time instead of place.
+ * The form is `@,<delay_ms>`. A step with no such line is gated on its captured position, which is
+ * what every step written before timed gates existed means.
+ */
+inline constexpr char kGateMarker = '@';
 /** Longest line one step occupies, including its terminator. */
 inline constexpr std::size_t kLineCapacity = 256;
-/** Largest roteiro file accepted into fixed storage. The extra lines cover the header. */
-inline constexpr std::size_t kFileCapacity = kLineCapacity * (kStepCapacity + 4);
+/**
+ * Largest roteiro file accepted.
+ *
+ * Every step may carry its full dialogue, and each spoken line is a line of the file. That makes the
+ * document too large for the caller's stack, so `load` and `save` hold it on the heap -- the callers
+ * here run on the game's own render thread, whose stack this module does not own.
+ */
+inline constexpr std::size_t kFileCapacity =
+    kLineCapacity * (kStepCapacity * (1 + kDialogueCapacity) + 8);
+/** One whole roteiro document. */
+using Document = std::array<char, kFileCapacity>;
 
 /**
  * Reports one store outcome on the Client channel.

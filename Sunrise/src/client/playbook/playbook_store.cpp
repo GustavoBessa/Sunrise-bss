@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string_view>
 
 #include "../../core/logging/log.h"
@@ -162,9 +163,16 @@ using Fields = std::array<std::string_view, kFieldCountV2>;
     const std::size_t subtitleField = 9;
     const std::size_t audioField = withSubtitle ? 10 : 9;
     const std::size_t labelField = withSubtitle ? 11 : 10;
-    if (withSubtitle && !fields[subtitleField].empty()
-        && !unsigned_field(fields[subtitleField], step.subtitleHash)) {
-        return false;
+    if (withSubtitle && !fields[subtitleField].empty()) {
+        // A version-2 file carried exactly one subtitle in a column. It becomes the step's first
+        // spoken line, so nothing already attached is lost. Version 3 leaves the column empty and
+        // writes every line as its own `+` line, dwell included.
+        std::uint32_t hash = 0;
+        if (!unsigned_field(fields[subtitleField], hash) || hash == 0) {
+            return false;
+        }
+        step.lines[0] = Line{hash, kDefaultDwellMs};
+        step.lineCount = 1;
     }
     // An empty audio column is the normal state today, so it reads as "no sound" rather than
     // failing the line.
@@ -217,7 +225,82 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
         store_metadata(value, output.description);
     } else if (key == "game_build") {
         store_metadata(value, output.gameBuild);
+    } else if (key == "order") {
+        // Anything other than the one word that means ordered leaves the roteiro free, which is what
+        // a file written before ordering existed says by saying nothing.
+        output.sequential = value == "sequential";
     }
+}
+
+/**
+ * Parses one `+` continuation line into a spoken line of the step above it.
+ *
+ * The form is `+,<subtitle_hash>,<dwell_ms>`, and the dwell may be left off to take the default. A
+ * line before any step, or on a step whose dialogue is already full, is refused.
+ *
+ * @param line Line without its terminator, `+` included.
+ * @param output Roteiro whose most recent step receives the line.
+ * @return True when the line was stored.
+ */
+[[nodiscard]] bool parse_line(std::string_view line, Roteiro& output) noexcept {
+    if (output.count == 0) {
+        return false;
+    }
+    Step& step = output.steps[output.count - 1];
+    if (step.lineCount >= step.lines.size()) {
+        return false;
+    }
+    std::string_view rest = line.substr(1);
+    if (rest.empty() || rest.front() != ',') {
+        return false;
+    }
+    rest.remove_prefix(1);
+    const std::size_t comma = rest.find(',');
+    const std::string_view hashField = comma == std::string_view::npos ? rest : rest.substr(0, comma);
+    Line stored{};
+    if (!unsigned_field(hashField, stored.subtitleHash) || stored.subtitleHash == 0) {
+        return false;
+    }
+    if (comma != std::string_view::npos) {
+        const std::string_view dwellField = rest.substr(comma + 1);
+        std::uint32_t dwell = 0;
+        if (!dwellField.empty()) {
+            if (!unsigned_field(dwellField, dwell) || dwell < kMinimumDwellMs
+                || dwell > kMaximumDwellMs) {
+                return false;
+            }
+            stored.dwellMs = static_cast<std::uint16_t>(dwell);
+        }
+    }
+    step.lines[step.lineCount++] = stored;
+    return true;
+}
+
+/**
+ * Parses one `@` continuation line into the timed gate of the step above it.
+ *
+ * @param line Line without its terminator, `@` included.
+ * @param output Roteiro whose most recent step receives the gate.
+ * @return True when the gate was stored.
+ */
+[[nodiscard]] bool parse_gate(std::string_view line, Roteiro& output) noexcept {
+    // A timed first step has nothing to wait on, so it would never fire and is refused here too.
+    if (output.count < 2) {
+        return false;
+    }
+    std::string_view rest = line.substr(1);
+    if (rest.empty() || rest.front() != ',') {
+        return false;
+    }
+    rest.remove_prefix(1);
+    std::uint32_t delay = 0;
+    if (!unsigned_field(rest, delay) || delay > kMaximumDelayMs) {
+        return false;
+    }
+    Step& step = output.steps[output.count - 1];
+    step.gate = Gate::delay;
+    step.delayMs = static_cast<std::uint16_t>(delay);
+    return true;
 }
 
 /**
@@ -230,7 +313,7 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
  */
 [[nodiscard]] bool append_step(const Step& step,
                                std::size_t ordinal,
-                               std::array<char, kFileCapacity>& document,
+                               Document& document,
                                std::size_t& used) noexcept {
     const std::string_view label = label_of(step);
     // The column is written in the same `0x` form the reader accepts, or left empty. A decimal
@@ -242,17 +325,13 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
                <= 0) {
         return false;
     }
-    std::array<char, 16> subtitle{};
-    if (step.subtitleHash != 0
-        && std::snprintf(
-               subtitle.data(), subtitle.size(), "0x%08X", static_cast<unsigned>(step.subtitleHash))
-               <= 0) {
-        return false;
-    }
+    // The subtitle column stays empty: dialogue is a list now, and every line of it -- including the
+    // first, with its own dwell -- goes on a `+` line below. Putting the first line here as well
+    // would read back twice.
     const int written =
         std::snprintf(document.data() + used,
                       document.size() - used,
-                      "%zu,%u,%u,%d,0x%08X,%.3f,%.3f,%.3f,%.1f,%s,%s,%.*s\r\n",
+                      "%zu,%u,%u,%d,0x%08X,%.3f,%.3f,%.3f,%.1f,,%s,%.*s\r\n",
                       ordinal,
                       static_cast<unsigned>(step.bubble),
                       static_cast<unsigned>(step.sliceState),
@@ -262,7 +341,6 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
                       static_cast<double>(step.position[1]),
                       static_cast<double>(step.position[2]),
                       static_cast<double>(step.radius),
-                      subtitle.data(),
                       audio.data(),
                       static_cast<int>(label.size()),
                       label.data());
@@ -270,6 +348,43 @@ void read_metadata(std::string_view line, Roteiro& output) noexcept {
         return false;
     }
     used += static_cast<std::size_t>(written);
+    return true;
+}
+
+/**
+ * Appends one step's continuation lines: its timed gate, then its dialogue in order.
+ * @param step Step to write.
+ * @param document Whole document storage.
+ * @param used Bytes already written, advanced on success.
+ * @return True when every line fit.
+ */
+[[nodiscard]] bool append_continuations(const Step& step,
+                                        Document& document,
+                                        std::size_t& used) noexcept {
+    if (step.gate == Gate::delay) {
+        const int written = std::snprintf(document.data() + used,
+                                          document.size() - used,
+                                          "%c,%u\r\n",
+                                          kGateMarker,
+                                          static_cast<unsigned>(step.delayMs));
+        if (written <= 0 || static_cast<std::size_t>(written) >= document.size() - used) {
+            return false;
+        }
+        used += static_cast<std::size_t>(written);
+    }
+    for (std::size_t index = 0; index < step.lineCount; ++index) {
+        const Line& line = step.lines[index];
+        const int written = std::snprintf(document.data() + used,
+                                          document.size() - used,
+                                          "%c,0x%08X,%u\r\n",
+                                          kLineMarker,
+                                          static_cast<unsigned>(line.subtitleHash),
+                                          static_cast<unsigned>(line.dwellMs));
+        if (written <= 0 || static_cast<std::size_t>(written) >= document.size() - used) {
+            return false;
+        }
+        used += static_cast<std::size_t>(written);
+    }
     return true;
 }
 
@@ -331,7 +446,15 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
         const DWORD error = GetLastError();
         return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
-    auto document = std::array<char, kFileCapacity>{};
+    // On the heap: a whole roteiro with all its dialogue is far past what belongs on the caller's
+    // stack, and the caller here is the game's own render thread.
+    auto storage = std::make_unique<Document>();
+    if (!storage) {
+        (void)CloseHandle(file);
+        report_fail("load", "storage");
+        return false;
+    }
+    Document& document = *storage;
     DWORD read = 0;
     const bool readOk =
         ReadFile(file, document.data(), static_cast<DWORD>(document.size() - 1), &read, nullptr)
@@ -362,13 +485,24 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
             continue;
         }
         if (!header) {
-            if (line == kMagicV2) {
+            if (line == kMagicV2 || line == kMagicV3) {
+                // Both carry the column; version 3 leaves it empty and speaks through `+` lines.
                 withSubtitle = true;
             } else if (line != kMagicV1) {
                 report_fail("load", "magic");
                 return false;
             }
             header = true;
+            continue;
+        }
+        // Continuation lines attach to the step above them, so they are dispatched before the step
+        // parse and never consume a step slot.
+        if (line.front() == kLineMarker) {
+            skipped += parse_line(line, output) ? 0U : 1U;
+            continue;
+        }
+        if (line.front() == kGateMarker) {
+            skipped += parse_gate(line, output) ? 0U : 1U;
             continue;
         }
         if (output.count >= output.steps.size()) {
@@ -394,7 +528,12 @@ bool load(const wchar_t* path, Roteiro& output) noexcept {
 
 /** Writes one roteiro to disk, replacing the file. */
 bool save(const wchar_t* path, const Roteiro& value) noexcept {
-    auto document = std::array<char, kFileCapacity>{};
+    auto storage = std::make_unique<Document>();
+    if (!storage) {
+        report_fail("save", "storage");
+        return false;
+    }
+    Document& document = *storage;
     std::size_t used = 0;
     const std::string_view author = value_of(value.author);
     const std::string_view description = value_of(value.description);
@@ -403,15 +542,18 @@ bool save(const wchar_t* path, const Roteiro& value) noexcept {
                                      document.size(),
                                      "%.*s\r\n"
                                      "# destination %.*s\r\n"
+                                     "# order %s\r\n"
                                      "# author %.*s\r\n"
                                      "# description %.*s\r\n"
                                      "# game_build %.*s\r\n"
                                      "# step,bubble,slice,region,spawn_hash,x,y,z,radius,"
-                                     "subtitle_hash,audio_tag,label\r\n",
-                                     static_cast<int>(kMagicV2.size()),
-                                     kMagicV2.data(),
+                                     "subtitle_hash,audio_tag,label\r\n"
+                                     "# @,delay_ms   |   +,subtitle_hash,dwell_ms\r\n",
+                                     static_cast<int>(kMagicV3.size()),
+                                     kMagicV3.data(),
                                      static_cast<int>(destination_of(value).size()),
                                      destination_of(value).data(),
+                                     value.sequential ? "sequential" : "free",
                                      static_cast<int>(author.size()),
                                      author.data(),
                                      static_cast<int>(description.size()),
@@ -424,7 +566,8 @@ bool save(const wchar_t* path, const Roteiro& value) noexcept {
     }
     used = static_cast<std::size_t>(header);
     for (std::size_t index = 0; index < value.count; ++index) {
-        if (!append_step(value.steps[index], index + 1, document, used)) {
+        if (!append_step(value.steps[index], index + 1, document, used)
+            || !append_continuations(value.steps[index], document, used)) {
             report_fail("save", "capacity");
             return false;
         }

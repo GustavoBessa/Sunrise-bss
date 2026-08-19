@@ -1,10 +1,16 @@
 /**
  * The mission playbook page. The top half lists the same four location values the HUD status
  * overlay shows, read and worded through the same shared sampler. The bottom half is the roteiro
- * built from them: captured steps, in order, each of which announces itself when reached.
+ * built from them: a sequence of beats, each announcing itself when reached and speaking its lines.
+ *
+ * The authoring loop lives in the selected-step editor. Judging a conversation's pacing means
+ * hearing it, and hearing it must not cost a walk across the destination for every adjustment, so
+ * the beat can be played from here without the player having reached it.
  */
 
 #include "playbook_panel.h"
+
+#include <Windows.h>
 
 #include <array>
 #include <cfloat>
@@ -21,6 +27,7 @@
 #include "../../../client/playbook/playbook_share.h"
 #include "../../../core/ui/components/filter/ui_filter_component.h"
 #include "../../../core/ui/components/section/ui_section_component.h"
+#include "../../../core/ui/components/toggle/ui_toggle_component.h"
 
 namespace sunrise::server::ui::playbook {
 namespace {
@@ -28,6 +35,8 @@ namespace {
 namespace book = client::playbook;
 namespace location = client::diagnostics::activity_location;
 namespace components = core::ui::components;
+namespace catalog = client::content::strings::catalog;
+namespace share = book::share;
 
 /** No step is selected. It lies immediately outside any roteiro. */
 constexpr std::size_t kNoSelection = book::kStepCapacity;
@@ -37,10 +46,6 @@ constexpr std::size_t kLabelInputCapacity = book::kLabelCapacity + 1;
 constexpr std::size_t kTagInputCapacity = 16;
 /** Widest location label, which sets the value column for the four rows. */
 constexpr char kWidestLabel[] = "Closest spawn";
-
-namespace catalog = client::content::strings::catalog;
-namespace share = book::share;
-
 /** Subtitle matches one search shows. */
 constexpr std::size_t kMatchCapacity = 40;
 /** Room for one search term plus its null. */
@@ -125,6 +130,66 @@ void draw_controls(const location::Location& sampled, bool inWorld) noexcept {
     }
 }
 
+/**
+ * Words one step's gate for the table.
+ * @param step Step to describe.
+ * @param output Receives a short null-terminated description.
+ */
+void format_gate(const book::Step& step, std::array<char, 24>& output) noexcept {
+    if (step.gate == book::Gate::delay) {
+        (void)std::snprintf(output.data(),
+                            output.size(),
+                            "+%.1fs",
+                            static_cast<double>(step.delayMs) / 1000.0);
+        return;
+    }
+    (void)std::snprintf(
+        output.data(), output.size(), "%.0fu", static_cast<double>(step.radius));
+}
+
+/**
+ * Draws the run block: how far the roteiro has got and what it is waiting for.
+ *
+ * The same numbers the HUD tracker shows, because following a mission and authoring one are the same
+ * act done at different moments, and a second source of truth for "where am I in the run" would
+ * eventually disagree with the first.
+ *
+ * @param roteiro Loaded roteiro.
+ */
+void draw_run(const book::Roteiro& roteiro) noexcept {
+    const book::Run run = book::run_state(GetTickCount64());
+    if (roteiro.count == 0) {
+        return;
+    }
+    ImGui::ProgressBar(static_cast<float>(run.reached) / static_cast<float>(run.stepCount),
+                       ImVec2(-FLT_MIN, 0.0F));
+    if (!run.active) {
+        ImGui::TextDisabled("not in world; the run starts on arrival");
+    } else if (run.nextOrdinal == 0) {
+        ImGui::TextDisabled("roteiro complete");
+    } else {
+        const std::string_view label{run.nextLabel.data(), run.nextLabelLength};
+        const std::string_view shown =
+            label.empty() ? std::string_view("unlabelled beat") : label;
+        ImGui::Text("Next: %zu. %.*s", run.nextOrdinal, static_cast<int>(shown.size()), shown.data());
+        ImGui::SameLine();
+        if (run.nextIsTimed) {
+            ImGui::TextDisabled("in %.1fs", static_cast<double>(run.nextWaitMs) / 1000.0);
+        } else if (run.nextDistanceKnown) {
+            ImGui::TextDisabled("%.0f units away", static_cast<double>(run.nextDistance));
+        } else {
+            ImGui::TextDisabled("in another bubble");
+        }
+        if (!run.sequential) {
+            // Said plainly, because the tracker's "next" reads as binding and here it is not.
+            ImGui::TextDisabled("the roteiro is free, so any beat can fire first");
+        }
+        if (g_selected != run.nextOrdinal - 1 && ImGui::SmallButton("Select this beat")) {
+            g_selected = run.nextOrdinal - 1;
+        }
+    }
+}
+
 /** Draws the step table and keeps the selection inside it. @param roteiro Loaded roteiro. */
 void draw_steps(const book::Roteiro& roteiro) noexcept {
     if (roteiro.count == 0) {
@@ -139,8 +204,8 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 28.0F);
     ImGui::TableSetupColumn("Bubble", ImGuiTableColumnFlags_WidthFixed, 52.0F);
-    ImGui::TableSetupColumn("Spawn");
-    ImGui::TableSetupColumn("Radius", ImGuiTableColumnFlags_WidthFixed, 56.0F);
+    ImGui::TableSetupColumn("Gate", ImGuiTableColumnFlags_WidthFixed, 56.0F);
+    ImGui::TableSetupColumn("Lines", ImGuiTableColumnFlags_WidthFixed, 44.0F);
     ImGui::TableSetupColumn("Label");
     ImGui::TableHeadersRow();
 
@@ -166,20 +231,21 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
         ImGui::TableNextColumn();
         ImGui::Text("%u", static_cast<unsigned>(step.bubble));
         ImGui::TableNextColumn();
-        if (step.spawnHash == 0) {
-            // Captured before the spawn catalog was ready, so this step has no readable anchor.
-            ImGui::TextDisabled("-");
+        std::array<char, 24> gate{};
+        format_gate(step, gate);
+        // A timed step is dimmed, so a glance separates the beats that are places from the beats
+        // that are pauses inside a conversation.
+        if (step.gate == book::Gate::delay) {
+            ImGui::TextDisabled("%s", gate.data());
         } else {
-            state::build_data::hash_names::Name storage{};
-            const std::string_view named = location::spawn_set_name(step.spawnHash, storage);
-            if (named.empty()) {
-                ImGui::Text("0x%08X", static_cast<unsigned>(step.spawnHash));
-            } else {
-                ImGui::Text("%.*s", static_cast<int>(named.size()), named.data());
-            }
+            ImGui::TextUnformatted(gate.data());
         }
         ImGui::TableNextColumn();
-        ImGui::Text("%.1f", static_cast<double>(step.radius));
+        if (step.lineCount == 0) {
+            ImGui::TextDisabled("-");
+        } else {
+            ImGui::Text("%u", static_cast<unsigned>(step.lineCount));
+        }
         ImGui::TableNextColumn();
         // A reached step is marked so the run's progress is readable at a glance.
         const std::string_view label = book::label_of(step);
@@ -192,6 +258,99 @@ void draw_steps(const book::Roteiro& roteiro) noexcept {
     ImGui::EndTable();
 }
 
+/**
+ * Draws the gate editor for one step.
+ * @param index Step ordinal. @param step Step being edited.
+ */
+void draw_gate(std::size_t index, const book::Step& step) noexcept {
+    const bool timed = step.gate == book::Gate::delay;
+    // The first step has nothing to wait on, so the choice is not offered there.
+    ImGui::BeginDisabled(index == 0);
+    if (ImGui::RadioButton("On reaching the place", !timed) && timed) {
+        (void)book::set_gate(index, book::Gate::place, 0U);
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton("After the previous step", timed) && !timed) {
+        (void)book::set_gate(index, book::Gate::delay, book::kDefaultDelayMs);
+    }
+    ImGui::EndDisabled();
+    if (index == 0) {
+        ImGui::TextDisabled("the first step is always the place it was captured");
+        return;
+    }
+    if (!timed) {
+        float radius = step.radius;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+        if (ImGui::DragFloat("Radius",
+                             &radius,
+                             0.5F,
+                             book::kMinimumRadius,
+                             book::kMaximumRadius,
+                             "%.1f units")) {
+            (void)book::set_radius(index, radius);
+        }
+        return;
+    }
+    int delay = static_cast<int>(step.delayMs);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
+    if (ImGui::DragInt("Wait", &delay, 50.0F, 0, static_cast<int>(book::kMaximumDelayMs), "%d ms")) {
+        (void)book::set_gate(index, book::Gate::delay, static_cast<std::uint16_t>(delay));
+    }
+    ImGui::TextDisabled("measured from the moment the previous step fired");
+}
+
+/**
+ * Draws one step's dialogue: its lines in order, their time on screen, and the play control.
+ * @param index Step ordinal. @param step Step being edited.
+ */
+void draw_dialogue(std::size_t index, const book::Step& step) noexcept {
+    if (step.lineCount == 0) {
+        ImGui::TextDisabled("no lines yet; find one under Subtitles and add it here");
+    }
+    for (std::size_t line = 0; line < step.lineCount; ++line) {
+        ImGui::PushID(static_cast<int>(line));
+        catalog::Match match{};
+        if (catalog::text_for(step.lines[line].subtitleHash, match)) {
+            ImGui::TextWrapped("%zu. %.*s",
+                               line + 1,
+                               static_cast<int>(match.length),
+                               match.text.data());
+        } else {
+            // Said plainly: the line still holds its slot and its wait, so the pacing the author
+            // wrote survives an install whose catalog does not carry this string.
+            ImGui::TextDisabled("%zu. 0x%08X, not in the catalog",
+                                line + 1,
+                                static_cast<unsigned>(step.lines[line].subtitleHash));
+        }
+        int dwell = static_cast<int>(step.lines[line].dwellMs);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.4F);
+        if (ImGui::DragInt("##dwell",
+                           &dwell,
+                           50.0F,
+                           static_cast<int>(book::kMinimumDwellMs),
+                           static_cast<int>(book::kMaximumDwellMs),
+                           "%d ms")) {
+            (void)book::set_line_dwell(index, line, static_cast<std::uint16_t>(dwell));
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) {
+            (void)book::remove_line(index, line);
+        }
+        ImGui::PopID();
+    }
+    ImGui::Spacing();
+    ImGui::BeginDisabled(step.lineCount == 0);
+    if (ImGui::Button("Play", ImVec2(ImGui::GetContentRegionAvail().x * 0.49F, 0.0F))) {
+        (void)book::preview(index, GetTickCount64());
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Stop", ImVec2(-FLT_MIN, 0.0F))) {
+        book::stop_preview();
+    }
+    ImGui::TextDisabled("Play speaks the beat on the HUD without walking the route.");
+}
+
 /** Draws the editor for the selected step. @param roteiro Loaded roteiro. */
 void draw_selected(const book::Roteiro& roteiro) noexcept {
     if (g_selected >= roteiro.count) {
@@ -201,6 +360,18 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
     }
     const book::Step& step = roteiro.steps[g_selected];
     ImGui::Text("Step %zu of %zu", g_selected + 1, roteiro.count);
+    if (step.spawnHash == 0) {
+        // Captured before the spawn catalog was ready, so this step has no readable anchor.
+        ImGui::TextDisabled("no nearest-spawn anchor recorded");
+    } else {
+        state::build_data::hash_names::Name storage{};
+        const std::string_view named = location::spawn_set_name(step.spawnHash, storage);
+        if (named.empty()) {
+            ImGui::TextDisabled("near spawn 0x%08X", static_cast<unsigned>(step.spawnHash));
+        } else {
+            ImGui::TextDisabled("near %.*s", static_cast<int>(named.size()), named.data());
+        }
+    }
     ImGui::TextDisabled("captured at %.1f, %.1f, %.1f  |  slice state %u  |  region %d",
                         static_cast<double>(step.position[0]),
                         static_cast<double>(step.position[1]),
@@ -208,32 +379,14 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
                         static_cast<unsigned>(step.sliceState),
                         static_cast<int>(step.region));
     ImGui::Spacing();
+    draw_gate(g_selected, step);
 
-    float radius = step.radius;
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5F);
-    if (ImGui::DragFloat("Radius",
-                         &radius,
-                         0.5F,
-                         book::kMinimumRadius,
-                         book::kMaximumRadius,
-                         "%.1f units")) {
-        (void)book::set_radius(g_selected, radius);
-    }
+    ImGui::Spacing();
+    ImGui::SeparatorText("Dialogue");
+    draw_dialogue(g_selected, step);
 
-    if (step.subtitleHash != 0) {
-        catalog::Match match{};
-        if (catalog::text_for(step.subtitleHash, match)) {
-            ImGui::TextWrapped("Subtitle: %.*s", static_cast<int>(match.length), match.text.data());
-        } else {
-            ImGui::TextDisabled("Subtitle 0x%08X, not in the catalog",
-                                static_cast<unsigned>(step.subtitleHash));
-        }
-        if (ImGui::SmallButton("Clear subtitle")) {
-            (void)book::set_subtitle(g_selected, 0);
-        }
-        ImGui::Spacing();
-    }
-
+    ImGui::Spacing();
+    ImGui::SeparatorText("Sound");
     (void)components::filter::input(
         "playbook_tag", "Audio tag, hex", g_tag.data(), g_tag.size());
     ImGui::TextDisabled("Nothing plays yet. The tag is stored for when a sound can be emitted.");
@@ -264,7 +417,7 @@ void draw_selected(const book::Roteiro& roteiro) noexcept {
     }
 }
 
-/** Draws the subtitle catalog: its build state, a search, and the attach action. */
+/** Draws the subtitle catalog: its build state, a search, and the add-line action. */
 void draw_subtitles(const book::Roteiro& roteiro) noexcept {
     if (!ImGui::TreeNodeEx("Subtitles", ImGuiTreeNodeFlags_SpanAvailWidth)) {
         return;
@@ -322,8 +475,8 @@ void draw_subtitles(const book::Roteiro& roteiro) noexcept {
 
     const bool attachable = g_matchSelected < g_matchCount && g_selected < roteiro.count;
     ImGui::BeginDisabled(!attachable);
-    if (ImGui::Button("Attach to selected step", ImVec2(-FLT_MIN, 0.0F))) {
-        (void)book::set_subtitle(g_selected, g_matches[g_matchSelected].hash);
+    if (ImGui::Button("Add as a line of the selected step", ImVec2(-FLT_MIN, 0.0F))) {
+        (void)book::append_line(g_selected, g_matches[g_matchSelected].hash);
     }
     ImGui::EndDisabled();
     if (!attachable) {
@@ -421,12 +574,24 @@ void draw() noexcept {
     std::array<char, 128> summary{};
     (void)std::snprintf(summary.data(),
                         summary.size(),
-                        "%.*s  |  %zu of %zu steps reached",
+                        "%.*s  |  %zu of %zu steps reached  |  %llus in world",
                         static_cast<int>(shown.size()),
                         shown.data(),
                         book::reached_count(),
-                        roteiro.count);
+                        roteiro.count,
+                        static_cast<unsigned long long>(book::run_age(GetTickCount64()) / 1000ULL));
     components::section::header("Roteiro", summary.data());
+    ImGui::Spacing();
+    bool sequential = roteiro.sequential;
+    if (components::toggle::control("Steps fire in order", sequential)
+        && roteiro.destinationLength != 0) {
+        (void)book::set_sequential(sequential);
+    }
+    ImGui::TextDisabled(roteiro.sequential
+                            ? "a step waits on the one before it, which is what a wait needs"
+                            : "any step fires as soon as it is reached, in any order");
+    ImGui::Spacing();
+    draw_run(roteiro);
     ImGui::Spacing();
     draw_steps(roteiro);
     ImGui::Spacing();

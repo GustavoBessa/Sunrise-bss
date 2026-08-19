@@ -133,6 +133,42 @@ struct ClassEntry {
 /** Visitor for when the package family is part of the extracted domain key. */
 using ClassEntryVisitor = bool (*)(void* context, const ClassEntry& entry) noexcept;
 
+/** One entry of the installed packages, with the class its entry table records for it. */
+struct InventoryEntry {
+    std::uint32_t tag{};
+    /** Tag class, straight out of the entry record. */
+    std::uint32_t classId{};
+    /** Leaf name without the patch suffix or extension. Valid only during the visitor call. */
+    std::wstring_view packageFamily;
+};
+
+/** Visitor called once per entry of an inventory walk. Returning false stops it and fails it. */
+using InventoryVisitor = bool (*)(void* context, const InventoryEntry& entry) noexcept;
+
+/**
+ * Reports every installed entry with the class its package's entry table records for it.
+ *
+ * This is the class scan with the comparison removed, and it exists because a class scan can only
+ * find what the caller already knows to look for. Answering "what classes does this package family
+ * even hold" -- the audio packages being the case in point -- needs the walk turned around.
+ *
+ * Only the highest patch of each package is walked, so an entry is reported once. Entry tables are
+ * plain file data, so this needs no block keys and runs before any are known.
+ *
+ * It reports every entry of every installed package, which is millions of calls. The visitor must be
+ * cheap, and a caller on a frame thread has to bound the work some other way.
+ *
+ * @param directory Installed packages directory.
+ * @param visitor Required non-owning entry consumer.
+ * @param context Caller context passed to the visitor.
+ * @param result Receives package, entry, and match totals.
+ * @return True when the walk and every visitor call work.
+ */
+[[nodiscard]] bool scan_entries(std::wstring_view directory,
+                                InventoryVisitor visitor,
+                                void* context,
+                                ScanResult& result) noexcept;
+
 /**
  * Reports every installed entry of one tag class.
  * Only the highest patch of each package is scanned, so a tag is reported once.
